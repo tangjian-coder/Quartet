@@ -17,7 +17,7 @@ public:
               double crop_factor_h, double crop_factor_v,
               double lambda1, double lambda2, double lambda3, double mu);
 
-    std::vector<Eigen::Quaterniond> optimize();
+    std::vector<Eigen::Quaterniond> optimize(const std::vector<Eigen::Quaterniond>& fixed_prefix_filtered = {});
 
     /// Set whether to use analytic gradient (if implemented) or numerical gradient.
     /// Default is false (use numerical gradient).
