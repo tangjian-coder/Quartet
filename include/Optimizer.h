@@ -20,11 +20,14 @@ public:
     std::vector<Eigen::Quaterniond> optimize(const std::vector<Eigen::Quaterniond>& fixed_prefix_filtered = {});
 
     /// Set whether to use analytic gradient (if implemented) or numerical gradient.
-    /// Default is false (use numerical gradient).
+    /// Default is true (use analytic gradient).
     void setUseAnalyticGradient(bool use) { use_analytic_gradient = use; }
 
     /// Enable/disable analytic gradient (same as setUseAnalyticGradient).
     void enableAnalyticGradient(bool enable = true) { use_analytic_gradient = enable; }
+
+    /// Enable/disable analytic-vs-numerical gradient check logs.
+    void enableGradientCheck(bool enable = true) { gradient_check_enabled = enable; }
 
 private:
     static double objective(const std::vector<double>& x, std::vector<double>& grad, void* data);
@@ -55,6 +58,7 @@ private:
     double lambda1, lambda2, lambda3, mu;
     int iteration_count;
     bool use_analytic_gradient;       // Flag to choose gradient method
+    bool gradient_check_enabled;      // Flag to compare analytic and numerical gradients
 };
 
 #endif // OPTIMIZER_H
