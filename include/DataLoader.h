@@ -4,13 +4,8 @@
 
 #include <string>
 #include <vector>
-#include <Eigen/Dense>
+#include "FrameData.h"
 #include <yaml-cpp/yaml.h>
-
-struct FrameData {
-    Eigen::Quaterniond orientation;
-    std::vector<Eigen::Vector2d> rcs_grid;
-};
 
 class DataLoader {
 public:

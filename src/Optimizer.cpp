@@ -1,445 +1,441 @@
 #include "Optimizer.h"
 #include "DataLoader.h"
 #include "GeometryTools.h"
+#include "ScopedTimer.h"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <limits>
-#include <random>
+
+// Boundary indices for 11x11 RCS grid (40 outer points vs 121 total)
+static const std::vector<size_t>& getBoundaryIndices() {
+    static const std::vector<size_t> idx = []() {
+        std::vector<size_t> v;
+        for (int j = 0; j < 11; ++j) v.push_back(j);
+        for (int i = 1; i <= 10; ++i) v.push_back(i * 11 + 10);
+        for (int j = 9; j >= 0; --j) v.push_back(10 * 11 + j);
+        for (int i = 9; i > 0; --i) v.push_back(i * 11);
+        return v;
+    }();
+    return idx;
+}
 
 namespace {
 
-Eigen::Matrix3d hat(const Eigen::Vector3d& vector) {
-    Eigen::Matrix3d skew = Eigen::Matrix3d::Zero();
-    skew(0, 1) = -vector.z();
-    skew(0, 2) = vector.y();
-    skew(1, 0) = vector.z();
-    skew(1, 2) = -vector.x();
-    skew(2, 0) = -vector.y();
-    skew(2, 1) = vector.x();
-    return skew;
+Eigen::Matrix3d hat(const Eigen::Vector3d& v) {
+    Eigen::Matrix3d s = Eigen::Matrix3d::Zero();
+    s(0, 1) = -v.z();
+    s(0, 2) = v.y();
+    s(1, 0) = v.z();
+    s(1, 2) = -v.x();
+    s(2, 0) = -v.y();
+    s(2, 1) = v.x();
+    return s;
 }
 
-Eigen::Matrix3d leftJacobianSO3(const Eigen::Vector3d& phi) {
-    const double theta = phi.norm();
+static Eigen::Matrix3d rightJacobianInverseSO3(const Eigen::Vector3d& phi) {
+    const double theta2 = phi.squaredNorm();
     const Eigen::Matrix3d I = Eigen::Matrix3d::Identity();
-    const Eigen::Matrix3d A = hat(phi);
-
-    if (theta < 1e-8) {
-        const Eigen::Matrix3d A2 = A * A;
-        return I + 0.5 * A + (1.0 / 6.0) * A2;
+    const Eigen::Matrix3d P = hat(phi);
+    if (theta2 < 1e-12) {
+        return I + 0.5 * P + (1.0 / 12.0) * (P * P);
     }
-
-    const double theta2 = theta * theta;
-    const double a = (1.0 - std::cos(theta)) / theta2;
-    const double b = (theta - std::sin(theta)) / (theta2 * theta);
-    return I + a * A + b * (A * A);
+    const double theta = std::sqrt(theta2);
+    const double coeff = 1.0 / theta2 - (1.0 + std::cos(theta)) / (2.0 * theta * std::sin(theta));
+    return I + 0.5 * P + coeff * (P * P);
 }
 
-Eigen::Matrix3d leftJacobianInverseSO3(const Eigen::Vector3d& phi) {
-    const double theta = phi.norm();
-    const Eigen::Matrix3d I = Eigen::Matrix3d::Identity();
-    const Eigen::Matrix3d A = hat(phi);
-
-    if (theta < 1e-8) {
-        const Eigen::Matrix3d A2 = A * A;
-        return I - 0.5 * A + (1.0 / 12.0) * A2;
+static Eigen::Quaterniond expMap(const Eigen::Vector3d& w) {
+    double theta2 = w.squaredNorm();
+    double theta = std::sqrt(theta2);
+    if (theta < 1e-10) {
+        return Eigen::Quaterniond(1.0, 0.5 * w.x(), 0.5 * w.y(), 0.5 * w.z()).normalized();
     }
-
-    const double theta2 = theta * theta;
-    const double sin_theta = std::sin(theta);
-    const double cos_theta = std::cos(theta);
-    const double c = (1.0 / theta2) - ((1.0 + cos_theta) / (2.0 * theta * sin_theta));
-    return I - 0.5 * A + c * (A * A);
+    double ha = 0.5 * theta;
+    double sha = std::sin(ha), cha = std::cos(ha);
+    return Eigen::Quaterniond(cha, sha / theta * w.x(), sha / theta * w.y(), sha / theta * w.z()).normalized();
 }
 
-Eigen::Vector3d readFrameAxisAngle(const std::vector<double>& x, size_t frame_index) {
-    const size_t base = frame_index * 3;
-    return Eigen::Vector3d(x[base], x[base + 1], x[base + 2]);
+static Eigen::Vector3d logMap(const Eigen::Quaterniond& q) {
+    Eigen::Quaterniond qn = q.normalized();
+    if (qn.w() < 0.0) qn.coeffs() *= -1.0;
+    double wc = std::clamp(qn.w(), -1.0, 1.0);
+    double ha = std::acos(wc);
+    double sha = std::sin(ha);
+    if (sha < 1e-10) return Eigen::Vector3d(2.0 * qn.x(), 2.0 * qn.y(), 2.0 * qn.z());
+    return 2.0 * ha / sha * Eigen::Vector3d(qn.x(), qn.y(), qn.z());
 }
 
-void addFrameGradient(std::vector<double>& grad, size_t frame_index, const Eigen::Vector3d& delta) {
-    const size_t base = frame_index * 3;
-    grad[base] += delta.x();
-    grad[base + 1] += delta.y();
-    grad[base + 2] += delta.z();
+static void accumulateGNSingle(double weight,
+                               const Eigen::Vector3d& residual,
+                               const Eigen::Matrix3d& J,
+                               int frame_idx, int prefix_count,
+                               Eigen::Ref<Eigen::MatrixXd> H,
+                               Eigen::Ref<Eigen::VectorXd> b) {
+    if (weight <= 0.0 || frame_idx < prefix_count) return;
+    int idx = (frame_idx - prefix_count) * 3;
+    b.segment<3>(idx) += weight * J.transpose() * residual;
+    H.block<3, 3>(idx, idx) += weight * J.transpose() * J;
 }
 
 } // namespace
 
-Optimizer::Optimizer(const std::vector<FrameData>& initial_data,
+// -----------------------------------------------------------------------
+// Constructor
+// -----------------------------------------------------------------------
+
+Optimizer::Optimizer(const std::vector<FrameData>& all_frames,
+                     std::vector<size_t> window_indices,
                      const Eigen::Matrix3d& K,
                      int width, int height,
                      double crop_factor_h, double crop_factor_v,
-                     double l1, double l2, double l3, double m)
-    : initial_frame_data(initial_data),
+                     const SolverConfig& config)
+    : all_frames_(&all_frames),
+      window_indices_(std::move(window_indices)),
       K(K),
+      Kinv(K.inverse()),
       width(width),
       height(height),
       crop_factor_h(crop_factor_h),
       crop_factor_v(crop_factor_v),
-      lambda1(l1), lambda2(l2), lambda3(l3), mu(m),
-      iteration_count(0),
-      use_analytic_gradient(true),
-      gradient_check_enabled(false) {
+      config_(config) {
     std::cout << "Optimizer initialized with:" << std::endl;
     std::cout << "  Image size: " << width << " x " << height << std::endl;
     std::cout << "  Crop factors: H=" << crop_factor_h << ", V=" << crop_factor_v << std::endl;
     std::cout << "  Camera matrix K:\n" << K << std::endl;
 }
 
-std::vector<Eigen::Quaterniond> Optimizer::optimize(const std::vector<Eigen::Quaterniond>& fixed_prefix_filtered) {
-    size_t num_frames = initial_frame_data.size();
-    if (num_frames == 0) {
-        return {};
+// -----------------------------------------------------------------------
+// Precompute boundary polygons and corner rays
+// -----------------------------------------------------------------------
+
+void Optimizer::precomputeBoundary(size_t prefix) {
+    prefix_ = prefix;
+    N_ = window_indices_.size();
+
+    const auto& bidx = getBoundaryIndices();
+    fixed_boundary_.resize(N_);
+    for (size_t i = 0; i < N_; ++i) {
+        fixed_boundary_[i].clear();
+        fixed_boundary_[i].reserve(bidx.size());
+        for (size_t b : bidx)
+            fixed_boundary_[i].push_back((*all_frames_)[window_indices_[i]].rcs_grid[b]);
     }
 
-    size_t fixed_prefix_count = std::min(fixed_prefix_filtered.size(), num_frames);
-    std::vector<double> x(num_frames * 3);
-
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_real_distribution<double> dist(-0.05, 0.05); // +/-0.05 rad
-    for (size_t i = 0; i < num_frames * 3; ++i) {
-        x[i] = dist(gen);
-    }
-
-    nlopt::opt opt(nlopt::LD_MMA, num_frames * 3);
-    opt.set_min_objective(Optimizer::objective, this);
-
-    // TODO: Add constraints after gradient implementation is complete
-    // std::vector<double> tol(num_frames * 4, 1e-8);
-    // opt.add_inequality_mconstraint(Optimizer::constraint, this, tol);
-
-    const double rotation_bound = std::acos(-1.0) / 6.0;
-    std::vector<double> lb(num_frames * 3, -rotation_bound);
-    std::vector<double> ub(num_frames * 3, rotation_bound);
-
-    // Prefix hard-fix: lb == ub for each axis-angle variable.
-    for (size_t i = 0; i < fixed_prefix_count; ++i) {
-        Eigen::Quaterniond q_orig = initial_frame_data[i].orientation;
-        Eigen::Quaterniond q_target = fixed_prefix_filtered[i];
-        q_orig.normalize();
-        q_target.normalize();
-
-        Eigen::Quaterniond dq_fixed = q_target * q_orig.inverse();
-        dq_fixed.normalize();
-        if (dq_fixed.w() < 0.0) {
-            dq_fixed.coeffs() *= -1.0;
-        }
-
-        Eigen::Vector3d fixed_axis_angle = quaternionToAxisAngle(dq_fixed);
-        for (size_t axis = 0; axis < 3; ++axis) {
-            size_t idx = i * 3 + axis;
-            x[idx] = fixed_axis_angle[axis];
-            lb[idx] = fixed_axis_angle[axis];
-            ub[idx] = fixed_axis_angle[axis];
-        }
-    }
-
-    if (fixed_prefix_count > 0) {
-        std::cout << "Optimizer: fixed prefix frames = " << fixed_prefix_count << std::endl;
-    }
-
-    opt.set_lower_bounds(lb);
-    opt.set_upper_bounds(ub);
-    opt.set_xtol_rel(1e-6);
-    opt.set_ftol_rel(1e-6);
-    opt.set_maxeval(5000);
-    opt.set_maxtime(300.0);
-
-    try {
-        double minf = 0.0;
-        nlopt::result result = opt.optimize(x, minf);
-        std::cout << "NLopt finished with result " << result << " and min value " << minf << std::endl;
-    } catch (const std::exception& e) {
-        std::cerr << "NLopt failed: " << e.what() << std::endl;
-    }
-
-    std::vector<Eigen::Quaterniond> filtered_quaternions;
-    filtered_quaternions.reserve(num_frames);
-    for (size_t i = 0; i < num_frames; ++i) {
-        Eigen::Vector3d axis_angle(x[i * 3 + 0], x[i * 3 + 1], x[i * 3 + 2]);
-        Eigen::Quaterniond dq = axisAngleToQuaternion(axis_angle);
-        Eigen::Quaterniond q_orig = initial_frame_data[i].orientation;
-        Eigen::Quaterniond q_filter = dq * q_orig;
-        q_filter.normalize();
-        filtered_quaternions.push_back(q_filter);
-    }
-
-    return filtered_quaternions;
+    double half_w = (width - 1) / 2.0;
+    double half_h = (height - 1) / 2.0;
+    double lx = -half_w * (1.0 - crop_factor_h);
+    double rx =  half_w * (1.0 - crop_factor_h);
+    double ty = -half_h * (1.0 - crop_factor_v);
+    double by =  half_h * (1.0 - crop_factor_v);
+    Eigen::Vector2d corners[4] = {{lx,ty},{rx,ty},{rx,by},{lx,by}};
+    for (int j = 0; j < 4; ++j)
+        corner_rays_[j] = Kinv * Eigen::Vector3d(corners[j].x(), corners[j].y(), 1.0);
+    focal_length_ = K(0, 0);
 }
 
-double Optimizer::objective(const std::vector<double>& x, std::vector<double>& grad, void* data) {
-    Optimizer* optimizer = static_cast<Optimizer*>(data);
+// -----------------------------------------------------------------------
+// Evaluate SDF: reverse-warp corners -> fixed RCS boundary
+// -----------------------------------------------------------------------
 
-    double f0 = optimizer->computeObjectiveValue(x);
+double Optimizer::evaluateSDF(const std::vector<Eigen::Quaterniond>& q_state) {
+    double max_viol = -1e10;
+    for (size_t i = prefix_; i < N_; ++i) {
+        Eigen::Matrix3d R_fs = ((*all_frames_)[window_indices_[i]].orientation.normalized()
+                                * q_state[i].inverse().normalized()).toRotationMatrix();
 
-    if (!grad.empty()) {
-        if (optimizer->use_analytic_gradient) {
-            optimizer->computeAnalyticGradient(x, grad);
-        } else {
-            optimizer->computeNumericalGradient(x, grad);
-        }
-    }
+        for (int j = 0; j < 4; ++j) {
+            Eigen::Vector3d y = R_fs * corner_rays_[j];
+            double zz = y.z();
+            if (std::abs(zz) < 1e-6) zz = (zz >= 0.0 ? 1e-6 : -1e-6);
 
-    optimizer->iteration_count++;
+            Eigen::Vector2d qp(focal_length_ * y.x() / zz, focal_length_ * y.y() / zz);
 
-    if (optimizer->iteration_count % 50 == 0) {
-        std::cout << "Iteration " << optimizer->iteration_count
-                  << ": Objective = " << f0 << std::endl;
-    }
+            int ci = -1; double tr = 0;
+            double s = GeometryTools::signedDistanceFromPointToPolygon(qp, fixed_boundary_[i], &ci, &tr);
+            g_cached_[i][j] = s;
+            max_viol = std::max(max_viol, s);
 
-    return f0;
-}
+            J_cached_[i][j].setZero();
+            if (ci >= 0 && std::abs(s) > 1e-8) {
+                size_t a = static_cast<size_t>(ci);
+                size_t b_next = (a + 1) % fixed_boundary_[i].size();
+                double tc = std::max(0.0, std::min(1.0, tr));
+                Eigen::Vector2d C = fixed_boundary_[i][a] + tc * (fixed_boundary_[i][b_next] - fixed_boundary_[i][a]);
+                double d = (qp - C).norm();
+                if (d > 1e-8) {
+                    Eigen::Vector2d dg_dp = (qp - C) / d;
 
-void Optimizer::constraint(unsigned m, double* result, unsigned n, const double* x, double* grad, void* data) {
-    (void)m;
-    Optimizer* optimizer = static_cast<Optimizer*>(data);
-    size_t num_frames = n / 3;
+                    Eigen::Matrix<double, 2, 3> Jproj;
+                    Jproj << focal_length_ / zz, 0, -focal_length_ * y.x() / (zz * zz),
+                             0, focal_length_ / zz, -focal_length_ * y.y() / (zz * zz);
 
-    double crop_h = optimizer->crop_factor_h;
-    double crop_v = optimizer->crop_factor_v;
-
-    std::vector<Eigen::Vector2d> target_corners;
-    double left = (1.0 - crop_h) / 2.0;
-    double right = 1.0 - left;
-    double top = (1.0 - crop_v) / 2.0;
-    double bottom = 1.0 - top;
-
-    target_corners.push_back(Eigen::Vector2d(left * optimizer->width, top * optimizer->height));
-    target_corners.push_back(Eigen::Vector2d(right * optimizer->width, top * optimizer->height));
-    target_corners.push_back(Eigen::Vector2d(right * optimizer->width, bottom * optimizer->height));
-    target_corners.push_back(Eigen::Vector2d(left * optimizer->width, bottom * optimizer->height));
-
-    for (size_t i = 0; i < num_frames; ++i) {
-        Eigen::Vector3d axis_angle(x[i * 3], x[i * 3 + 1], x[i * 3 + 2]);
-        Eigen::Quaterniond dq = axisAngleToQuaternion(axis_angle);
-        Eigen::Quaterniond q_orig = optimizer->initial_frame_data[i].orientation;
-        Eigen::Quaterniond q_filter = dq * q_orig;
-
-        Eigen::Matrix3d H = GeometryTools::calculateHomography(q_orig, q_filter, optimizer->K);
-
-        std::vector<Eigen::Vector2d> transformed_grid;
-        transformed_grid.reserve(optimizer->initial_frame_data[i].rcs_grid.size());
-        for (const auto& p : optimizer->initial_frame_data[i].rcs_grid) {
-            transformed_grid.push_back(GeometryTools::transformPoint(p, H));
-        }
-
-        for (size_t j = 0; j < 4; ++j) {
-            result[i * 4 + j] = GeometryTools::signedDistanceFromPointToPolygon(target_corners[j], transformed_grid);
-        }
-    }
-
-    if (grad) {
-        // Gradient for constraints is not implemented.
-    }
-}
-
-Eigen::Quaterniond Optimizer::axisAngleToQuaternion(const Eigen::Vector3d& axis_angle) {
-    double angle = axis_angle.norm();
-    if (angle < 1e-9) {
-        return Eigen::Quaterniond::Identity();
-    }
-    Eigen::Vector3d axis = axis_angle.normalized();
-    return Eigen::Quaterniond(Eigen::AngleAxisd(angle, axis));
-}
-
-Eigen::Vector3d Optimizer::quaternionToAxisAngle(const Eigen::Quaterniond& q) {
-    Eigen::AngleAxisd angle_axis(q);
-    return angle_axis.angle() * angle_axis.axis();
-}
-
-double Optimizer::computeObjectiveValue(const std::vector<double>& x) {
-    // Optimization variable layout:
-    // - `x` is a flat axis-angle vector with 3 parameters per frame.
-    // - For frame i: (x[3*i+0], x[3*i+1], x[3*i+2]) is the axis-angle delta rotation `dq_i`.
-    // - This function assumes `x.size()` is divisible by 3.
-    size_t num_frames = x.size() / 3;
-
-    // Convert axis-angle deltas to quaternions dq_i (close to identity for small axis-angle).
-    std::vector<Eigen::Quaterniond> dq_quaternions(num_frames);
-    for (size_t i = 0; i < num_frames; ++i) {
-        Eigen::Vector3d axis_angle(x[i * 3], x[i * 3 + 1], x[i * 3 + 2]);
-        dq_quaternions[i] = axisAngleToQuaternion(axis_angle);
-    }
-
-    // Apply deltas to the original orientations.
-    // Convention (Eigen composition): q_filt = dq * q_orig means q_orig is applied first, then dq.
-    std::vector<Eigen::Quaterniond> filtered_quaternions(num_frames);
-    for (size_t i = 0; i < num_frames; ++i) {
-        Eigen::Quaterniond q_orig = initial_frame_data[i].orientation;
-        q_orig.normalize();
-        filtered_quaternions[i] = dq_quaternions[i] * q_orig;
-        filtered_quaternions[i].normalize();
-    }
-
-    // Relative rotation increments between consecutive filtered frames (a "velocity" proxy in SO(3)).
-    // Left-increment convention:
-    // r_i = Log( q_i * q_{i-1}^{-1} ) expressed as axis-angle (stored as a 3D vector).
-    std::vector<Eigen::Vector3d> relative_axis_angles(num_frames);
-    relative_axis_angles[0] = Eigen::Vector3d::Zero();
-    for (size_t i = 1; i < num_frames; ++i) {
-        Eigen::Quaterniond relative_q = filtered_quaternions[i] * filtered_quaternions[i - 1].inverse();
-        relative_axis_angles[i] = quaternionToAxisAngle(relative_q);
-    }
-
-    double smoothness_cost = 0.0;
-    double fidelity_cost = 0.0;
-
-    // Smoothness terms:
-    // - velocity:     ||r_i||^2
-    // - acceleration: ||r_i - r_{i-1}||^2
-    // - jerk:         ||r_i - 2 r_{i-1} + r_{i-2}||^2
-
-    // 1st-order term (velocity proxy): defined for i >= 1.
-    for (size_t i = 1; i < num_frames; ++i) {
-        smoothness_cost += lambda1 * relative_axis_angles[i].squaredNorm();
-    }
-
-    // 2nd-order term (acceleration proxy): backward difference, defined for i >= 2.
-    for (size_t i = 2; i < num_frames; ++i) {
-        Eigen::Vector3d acc = relative_axis_angles[i] - relative_axis_angles[i - 1];
-        smoothness_cost += lambda2 * acc.squaredNorm();
-    }
-
-    // 3rd-order term (jerk proxy): backward stencil, defined for i >= 3.
-    for (size_t i = 3; i < num_frames; ++i) {
-        Eigen::Vector3d jerk = relative_axis_angles[i] - 2 * relative_axis_angles[i - 1] + relative_axis_angles[i - 2];
-        smoothness_cost += lambda3 * jerk.squaredNorm();
-    }
-
-    // Fidelity/regularization term: penalize the magnitude of each delta axis-angle directly,
-    // encouraging dq_i to stay close to identity (i.e., remain close to the original trajectory).
-    for (size_t i = 0; i < num_frames; ++i) {
-        Eigen::Vector3d dq_axis_angle(x[i * 3], x[i * 3 + 1], x[i * 3 + 2]);
-        fidelity_cost += mu * dq_axis_angle.squaredNorm();
-    }
-
-    // Total objective = smoothness + fidelity.
-    return smoothness_cost + fidelity_cost;
-}
-
-void Optimizer::computeNumericalGradient(const std::vector<double>& x, std::vector<double>& grad) {
-    const double h = 1e-6;
-    for (size_t j = 0; j < x.size(); ++j) {
-        std::vector<double> x_plus = x;
-        std::vector<double> x_minus = x;
-        x_plus[j] += h;
-        x_minus[j] -= h;
-        double f_plus = computeObjectiveValue(x_plus);
-        double f_minus = computeObjectiveValue(x_minus);
-        grad[j] = (f_plus - f_minus) / (2.0 * h);
-    }
-}
-
-void Optimizer::computeAnalyticGradient(const std::vector<double>& x, std::vector<double>& grad) {
-    const size_t num_frames = x.size() / 3;
-    grad.assign(x.size(), 0.0);
-
-    if (num_frames == 0) {
-        return;
-    }
-
-    // Forward cache: x_i -> dq_i -> q_i -> q_rel_i -> r_i, and Jacobians needed for backward pass.
-    std::vector<Eigen::Vector3d> axis_angles(num_frames, Eigen::Vector3d::Zero());
-    std::vector<Eigen::Quaterniond> filtered_quaternions(num_frames, Eigen::Quaterniond::Identity());
-    std::vector<Eigen::Vector3d> relative_axis_angles(num_frames, Eigen::Vector3d::Zero());
-    std::vector<Eigen::Matrix3d> Jl_x(num_frames, Eigen::Matrix3d::Identity());
-    std::vector<Eigen::Matrix3d> Jl_inv_r(num_frames, Eigen::Matrix3d::Identity());
-    std::vector<Eigen::Matrix3d> R_rel(num_frames, Eigen::Matrix3d::Identity());
-
-    for (size_t i = 0; i < num_frames; ++i) {
-        axis_angles[i] = readFrameAxisAngle(x, i);
-        Jl_x[i] = leftJacobianSO3(axis_angles[i]);
-
-        Eigen::Quaterniond dq = axisAngleToQuaternion(axis_angles[i]);
-        Eigen::Quaterniond q_orig = initial_frame_data[i].orientation;
-        q_orig.normalize();
-        filtered_quaternions[i] = dq * q_orig;
-        filtered_quaternions[i].normalize();
-    }
-
-    for (size_t i = 1; i < num_frames; ++i) {
-        Eigen::Quaterniond relative_q = filtered_quaternions[i] * filtered_quaternions[i - 1].inverse();
-        relative_axis_angles[i] = quaternionToAxisAngle(relative_q);
-        Jl_inv_r[i] = leftJacobianInverseSO3(relative_axis_angles[i]);
-        R_rel[i] = relative_q.toRotationMatrix();
-    }
-
-    // Accumulate dL/dr_i from all smoothness terms.
-    std::vector<Eigen::Vector3d> dL_dr(num_frames, Eigen::Vector3d::Zero());
-
-    // Velocity term: lambda1 * ||r_i||^2, i >= 1.
-    for (size_t i = 1; i < num_frames; ++i) {
-        dL_dr[i] += 2.0 * lambda1 * relative_axis_angles[i];
-    }
-
-    // Acceleration term: lambda2 * ||r_i - r_{i-1}||^2, i >= 2.
-    for (size_t i = 2; i < num_frames; ++i) {
-        Eigen::Vector3d acc = relative_axis_angles[i] - relative_axis_angles[i - 1];
-        dL_dr[i] += 2.0 * lambda2 * acc;
-        dL_dr[i - 1] -= 2.0 * lambda2 * acc;
-    }
-
-    // Jerk term: lambda3 * ||r_i - 2 r_{i-1} + r_{i-2}||^2, i >= 3.
-    for (size_t i = 3; i < num_frames; ++i) {
-        Eigen::Vector3d jerk = relative_axis_angles[i] - 2.0 * relative_axis_angles[i - 1] + relative_axis_angles[i - 2];
-        dL_dr[i] += 2.0 * lambda3 * jerk;
-        dL_dr[i - 1] -= 4.0 * lambda3 * jerk;
-        dL_dr[i - 2] += 2.0 * lambda3 * jerk;
-    }
-
-    // Chain rule from r_i back to x_i and x_{i-1} under left-increment convention:
-    // r_i = Log(q_i * q_{i-1}^{-1}).
-    for (size_t i = 1; i < num_frames; ++i) {
-        const Eigen::Vector3d& g_i = dL_dr[i];
-
-        Eigen::Matrix3d dr_dxi = Jl_inv_r[i] * Jl_x[i];
-        Eigen::Vector3d grad_xi = dr_dxi.transpose() * g_i;
-        addFrameGradient(grad, i, grad_xi);
-
-        Eigen::Matrix3d dr_dxim1 = -Jl_inv_r[i] * R_rel[i] * Jl_x[i - 1];
-        Eigen::Vector3d grad_xim1 = dr_dxim1.transpose() * g_i;
-        addFrameGradient(grad, i - 1, grad_xim1);
-    }
-
-    // Fidelity term: mu * ||x_i||^2.
-    for (size_t i = 0; i < num_frames; ++i) {
-        addFrameGradient(grad, i, 2.0 * mu * axis_angles[i]);
-    }
-
-    // Optional gradient check against finite differences.
-    if (gradient_check_enabled) {
-        std::vector<double> numerical_grad(grad.size(), 0.0);
-        computeNumericalGradient(x, numerical_grad);
-
-        double max_abs_error = 0.0;
-        double max_rel_error = 0.0;
-        size_t max_abs_index = 0;
-        size_t max_rel_index = 0;
-        double rel_error_sum = 0.0;
-
-        for (size_t j = 0; j < grad.size(); ++j) {
-            const double abs_error = std::abs(grad[j] - numerical_grad[j]);
-            const double denom = std::max(1e-12, std::max(std::abs(grad[j]), std::abs(numerical_grad[j])));
-            const double rel_error = abs_error / denom;
-
-            rel_error_sum += rel_error;
-            if (abs_error > max_abs_error) {
-                max_abs_error = abs_error;
-                max_abs_index = j;
+                    J_cached_[i][j] = dg_dp.transpose() * Jproj * hat(y) * R_fs;
+                }
             }
-            if (rel_error > max_rel_error) {
-                max_rel_error = rel_error;
-                max_rel_index = j;
+        }
+    }
+    return max_viol;
+}
+
+// -----------------------------------------------------------------------
+// Build smoothness + fidelity Hessian and gradient
+// -----------------------------------------------------------------------
+
+void Optimizer::buildSmoothnessHessian(const std::vector<Eigen::Quaterniond>& q_state,
+                                        Eigen::Ref<Eigen::MatrixXd> H,
+                                        Eigen::Ref<Eigen::VectorXd> b) {
+    size_t N = N_;
+    size_t prefix = prefix_;
+
+    std::vector<Eigen::Vector3d> vel_r(N, Eigen::Vector3d::Zero());
+    std::vector<Eigen::Matrix3d> JrInv(N, Eigen::Matrix3d::Identity());
+    std::vector<Eigen::Matrix3d> Radj(N, Eigen::Matrix3d::Identity());
+
+    for (size_t i = 1; i < N; ++i) {
+        Eigen::Quaterniond V = (q_state[i - 1].inverse() * q_state[i]).normalized();
+        vel_r[i] = logMap(V);
+        JrInv[i] = rightJacobianInverseSO3(vel_r[i]);
+        Radj[i - 1] = q_state[i - 1].inverse().toRotationMatrix();
+    }
+
+    auto Jvel = [&](size_t k) -> Eigen::Matrix3d {
+        return JrInv[k] * Radj[k - 1];
+    };
+
+    // Velocity: lambda1 * ||r_i||^2
+    for (size_t i = 1; i < N; ++i) {
+        Eigen::Matrix3d J = Jvel(i);
+        if (i >= prefix) {
+            int ii = static_cast<int>(i - prefix) * 3;
+            b.segment<3>(ii) += config_.lambda1 * J.transpose() * vel_r[i];
+            H.block<3, 3>(ii, ii) += config_.lambda1 * J.transpose() * J;
+        }
+        if (i - 1 >= prefix) {
+            int im = static_cast<int>(i - 1 - prefix) * 3;
+            b.segment<3>(im) -= config_.lambda1 * J.transpose() * vel_r[i];
+            H.block<3, 3>(im, im) += config_.lambda1 * J.transpose() * J;
+        }
+        if (i >= prefix && i - 1 >= prefix) {
+            int ii = static_cast<int>(i - prefix) * 3;
+            int im1 = static_cast<int>(i - 1 - prefix) * 3;
+            H.block<3, 3>(ii, im1) -= config_.lambda1 * J.transpose() * J;
+            H.block<3, 3>(im1, ii) -= config_.lambda1 * J.transpose() * J;
+        }
+    }
+
+    // Acceleration: lambda2 * ||r_i - r_{i-1}||^2
+    for (size_t i = 2; i < N; ++i) {
+        Eigen::Vector3d acc = vel_r[i] - vel_r[i - 1];
+        Eigen::Matrix3d Ji = Jvel(i), Ji1 = Jvel(i - 1);
+        struct FJ { int fi; Eigen::Matrix3d J; };
+        FJ blocks[3] = {
+            {static_cast<int>(i), Ji},
+            {static_cast<int>(i - 1), -(Ji + Ji1)},
+            {static_cast<int>(i - 2), Ji1}
+        };
+        for (int a = 0; a < 3; ++a) {
+            if (blocks[a].fi < static_cast<int>(prefix)) continue;
+            int ia = (blocks[a].fi - static_cast<int>(prefix)) * 3;
+            b.segment<3>(ia) += config_.lambda2 * blocks[a].J.transpose() * acc;
+            for (int bb = 0; bb < 3; ++bb) {
+                if (blocks[bb].fi < static_cast<int>(prefix)) continue;
+                int ib = (blocks[bb].fi - static_cast<int>(prefix)) * 3;
+                H.block<3, 3>(ia, ib) += config_.lambda2 * blocks[a].J.transpose() * blocks[bb].J;
+            }
+        }
+    }
+
+    // Jerk: lambda3 * ||r_i - 2r_{i-1} + r_{i-2}||^2
+    for (size_t i = 3; i < N; ++i) {
+        Eigen::Vector3d jerk = vel_r[i] - 2.0 * vel_r[i - 1] + vel_r[i - 2];
+        Eigen::Matrix3d Ji = Jvel(i), Ji1 = Jvel(i - 1), Ji2 = Jvel(i - 2);
+        struct FJ { int fi; Eigen::Matrix3d J; };
+        FJ blocks[4] = {
+            {static_cast<int>(i), Ji},
+            {static_cast<int>(i - 1), -Ji - 2.0 * Ji1},
+            {static_cast<int>(i - 2), 2.0 * Ji1 + Ji2},
+            {static_cast<int>(i - 3), -Ji2}
+        };
+        for (int a = 0; a < 4; ++a) {
+            if (blocks[a].fi < static_cast<int>(prefix)) continue;
+            int ia = (blocks[a].fi - static_cast<int>(prefix)) * 3;
+            b.segment<3>(ia) += config_.lambda3 * blocks[a].J.transpose() * jerk;
+            for (int bb = 0; bb < 4; ++bb) {
+                if (blocks[bb].fi < static_cast<int>(prefix)) continue;
+                int ib = (blocks[bb].fi - static_cast<int>(prefix)) * 3;
+                H.block<3, 3>(ia, ib) += config_.lambda3 * blocks[a].J.transpose() * blocks[bb].J;
+            }
+        }
+    }
+
+    // Fidelity: mu * ||Log(q_i^{-1} * q_target)||^2
+    for (size_t i = prefix; i < N; ++i) {
+        Eigen::Quaterniond target = (*all_frames_)[window_indices_[i]].orientation.normalized();
+        Eigen::Quaterniond dq = q_state[i].inverse() * target;
+        dq.normalize();
+        Eigen::Vector3d r_f = logMap(dq);
+        Eigen::Matrix3d J_f = -rightJacobianInverseSO3(r_f) * q_state[i].inverse().toRotationMatrix();
+        accumulateGNSingle(config_.mu, r_f, J_f, static_cast<int>(i), static_cast<int>(prefix), H, b);
+    }
+}
+
+// -----------------------------------------------------------------------
+// Build ALM constraint penalty
+// -----------------------------------------------------------------------
+
+void Optimizer::buildConstraintPenalty(double rho, double inv_f,
+                                       const std::vector<std::vector<double>>& lambda,
+                                       Eigen::Ref<Eigen::MatrixXd> H,
+                                       Eigen::Ref<Eigen::VectorXd> b) {
+    for (size_t i = prefix_; i < N_; ++i) {
+        int act_i = static_cast<int>(i - prefix_);
+        int ii = act_i * 3;
+        for (int j = 0; j < 4; ++j) {
+            double g = g_cached_[i][j] * inv_f;
+            double lam = lambda[act_i][j];
+            double mu_eff = std::max(0.0, lam + rho * g);
+            if (mu_eff <= 1e-12) continue;
+
+            Eigen::RowVector3d Jc = J_cached_[i][j] * inv_f;
+            b.segment<3>(ii) += mu_eff * Jc.transpose();
+            H.block<3, 3>(ii, ii) += rho * (Jc.transpose() * Jc);
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Verify constraints using forward-warp cross-check
+// -----------------------------------------------------------------------
+
+void Optimizer::verifyConstraints(const std::vector<Eigen::Quaterniond>& q_state) {
+    int viol_count = 0;
+    double max_sdf_all = -1e10, min_sdf_all = 1e10;
+    const auto& boundary = getBoundaryIndices();
+
+    double max_delta_deg = 0.0;
+    const double pi = std::acos(-1.0);
+
+    double hw2 = (width - 1) / 2.0;
+    double hh2 = (height - 1) / 2.0;
+    double lpx = -hw2 * (1.0 - crop_factor_h);
+    double rpx =  hw2 * (1.0 - crop_factor_h);
+    double tpy = -hh2 * (1.0 - crop_factor_v);
+    double bpy =  hh2 * (1.0 - crop_factor_v);
+    Eigen::Vector2d corners_img[4] = {{lpx,tpy},{rpx,tpy},{rpx,bpy},{lpx,bpy}};
+
+    for (size_t i = 0; i < N_; ++i) {
+        Eigen::Quaterniond dq = q_state[i].inverse() * (*all_frames_)[window_indices_[i]].orientation.normalized();
+        dq.normalize();
+        double da = 2.0 * std::acos(std::clamp(std::abs(dq.w()), -1.0, 1.0));
+        if (da * 180.0 / pi > max_delta_deg) max_delta_deg = da * 180.0 / pi;
+        Eigen::Matrix3d R_dq = dq.toRotationMatrix();
+        Eigen::Matrix3d Ht = K * R_dq * Kinv;
+
+        std::vector<Eigen::Vector2d> warped;
+        warped.reserve(boundary.size());
+        for (size_t b : boundary)
+            warped.push_back(GeometryTools::transformPoint((*all_frames_)[window_indices_[i]].rcs_grid[b], Ht));
+
+        double max_sdf = -1e10;
+        double frame_min_sdf = 1e10;
+        for (int j = 0; j < 4; ++j) {
+            double s = GeometryTools::signedDistanceFromPointToPolygon(corners_img[j], warped);
+            if (s > max_sdf) max_sdf = s;
+            if (s < frame_min_sdf) frame_min_sdf = s;
+        }
+        if (max_sdf > 0) viol_count++;
+        if (max_sdf > max_sdf_all) max_sdf_all = max_sdf;
+        if (frame_min_sdf < min_sdf_all) min_sdf_all = frame_min_sdf;
+    }
+
+    std::cout << "  [Verify] " << N_ << " frames"
+              << " max_sdf=" << max_sdf_all
+              << " min_sdf=" << min_sdf_all
+              << " violations=" << viol_count
+              << " max_Δ=" << max_delta_deg << "°" << std::endl;
+}
+
+// -----------------------------------------------------------------------
+// Main solver: GN + ALM
+// -----------------------------------------------------------------------
+
+std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
+    const std::vector<Eigen::Quaterniond>& fixed_prefix_filtered)
+{
+    PROFILE_SCOPE("solveWindowGN");
+
+    size_t N = window_indices_.size();
+    if (N == 0) return {};
+
+    size_t prefix = std::min(fixed_prefix_filtered.size(), N);
+    int dof = static_cast<int>(N - prefix) * 3;
+
+    std::vector<Eigen::Quaterniond> q_state(N);
+    for (size_t i = 0; i < N; ++i)
+        q_state[i] = (*all_frames_)[window_indices_[i]].orientation.normalized();
+    for (size_t i = 0; i < prefix; ++i)
+        q_state[i] = fixed_prefix_filtered[i].normalized();
+
+    precomputeBoundary(prefix);
+
+    g_cached_.assign(N, std::vector<double>(4, 0.0));
+    J_cached_.assign(N, std::vector<Eigen::RowVector3d>(4));
+
+    std::vector<std::vector<double>> lambda(N - prefix, std::vector<double>(4, 0.0));
+
+    double rho = config_.rho_init;
+    double max_viol = evaluateSDF(q_state);
+
+    for (int outer = 0; outer < config_.max_outer; ++outer) {
+        bool active_constraints = (max_viol > 0);
+        double inv_f = 1.0 / focal_length_;
+
+        for (int inner = 0; inner < config_.max_inner; ++inner) {
+            Eigen::MatrixXd H = Eigen::MatrixXd::Zero(dof, dof);
+            Eigen::VectorXd b = Eigen::VectorXd::Zero(dof);
+
+            buildSmoothnessHessian(q_state, H, b);
+            buildConstraintPenalty(rho, inv_f, lambda, H, b);
+
+            for (int k = 0; k < dof; ++k) H(k, k) += 1e-6;
+
+            Eigen::LDLT<Eigen::MatrixXd> ldlt(H);
+            if (ldlt.info() != Eigen::Success) break;
+
+            Eigen::VectorXd dx = ldlt.solve(-b);
+            if (!dx.allFinite()) break;
+
+            double dx_norm = dx.norm();
+            if (dx_norm < 1e-6) break;
+
+            const double max_angle = std::acos(-1.0) / 6.0;
+            for (size_t i = prefix; i < N; ++i) {
+                int ii = static_cast<int>(i - prefix) * 3;
+                Eigen::Vector3d d = dx.segment<3>(ii);
+                double d_norm = d.norm();
+                if (d_norm > max_angle) d *= max_angle / d_norm;
+                q_state[i] = (expMap(d) * q_state[i]).normalized();
+            }
+
+            if (active_constraints && inner > 0)
+                evaluateSDF(q_state);
+        }
+
+        max_viol = evaluateSDF(q_state);
+        std::cout << "ALM outer " << outer << " max_viol=" << max_viol << " rho=" << rho << std::endl;
+        if (max_viol < config_.outer_tol) break;
+
+        for (size_t i = prefix; i < N; ++i) {
+            int act_i = static_cast<int>(i - prefix);
+            for (int j = 0; j < 4; ++j) {
+                lambda[act_i][j] = std::max(0.0, lambda[act_i][j] + rho * g_cached_[i][j] * inv_f);
             }
         }
 
-        const double mean_rel_error = rel_error_sum / static_cast<double>(grad.size());
-        std::cout << "Gradient check (analytic vs numerical):"
-                  << " max_abs_err=" << max_abs_error << " @idx " << max_abs_index
-                  << ", max_rel_err=" << max_rel_error << " @idx " << max_rel_index
-                  << ", mean_rel_err=" << mean_rel_error << std::endl;
+        rho = std::min(rho * config_.gamma, config_.rho_max);
     }
+
+    verifyConstraints(q_state);
+    return q_state;
 }

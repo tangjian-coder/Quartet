@@ -4,19 +4,8 @@
 
 #include <Eigen/Dense>
 #include <vector>
-#include "DataLoader.h"
 
 namespace GeometryTools {
-
-/**
- * @brief Calculates the homography matrix H = K * (R2 * R1.transpose()) * K.inverse().
- *
- * @param q1 Original orientation.
- * @param q2 Smoothed orientation.
- * @param K Camera intrinsics matrix.
- * @return The 3x3 homography matrix.
- */
-Eigen::Matrix3d calculateHomography(const Eigen::Quaterniond& q1, const Eigen::Quaterniond& q2, const Eigen::Matrix3d& K);
 
 /**
  * @brief Transforms a 2D point using a homography matrix.
@@ -36,7 +25,8 @@ Eigen::Vector2d transformPoint(const Eigen::Vector2d& point, const Eigen::Matrix
  * @param polygon The vertices of the polygon in order.
  * @return The signed distance.
  */
-double signedDistanceFromPointToPolygon(const Eigen::Vector2d& point, const std::vector<Eigen::Vector2d>& polygon);
+double signedDistanceFromPointToPolygon(const Eigen::Vector2d& point, const std::vector<Eigen::Vector2d>& polygon,
+                                           int* closest_edge_idx = nullptr, double* t_param = nullptr);
 
 }
 

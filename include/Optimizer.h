@@ -4,61 +4,61 @@
 
 #include <vector>
 #include <Eigen/Dense>
-#include <nlopt.hpp>
+#include "FrameData.h"
 
-// Forward declaration
-struct FrameData;
+struct SolverConfig {
+    double lambda1 = 1.0;
+    double lambda2 = 2.0;
+    double lambda3 = 8.0;
+    double mu = 0.02;
+    double rho_init = 20.0;
+    double rho_max = 500.0;
+    double gamma = 1.5;
+    int max_outer = 5;
+    int max_inner = 8;
+    double outer_tol = 1e-4;
+};
 
 class Optimizer {
 public:
-    Optimizer(const std::vector<FrameData>& initial_data,
+    Optimizer(const std::vector<FrameData>& all_frames,
+              std::vector<size_t> window_indices,
               const Eigen::Matrix3d& K,
               int width, int height,
               double crop_factor_h, double crop_factor_v,
-              double lambda1, double lambda2, double lambda3, double mu);
+              const SolverConfig& config = SolverConfig());
 
-    std::vector<Eigen::Quaterniond> optimize(const std::vector<Eigen::Quaterniond>& fixed_prefix_filtered = {});
-
-    /// Set whether to use analytic gradient (if implemented) or numerical gradient.
-    /// Default is true (use analytic gradient).
-    void setUseAnalyticGradient(bool use) { use_analytic_gradient = use; }
-
-    /// Enable/disable analytic gradient (same as setUseAnalyticGradient).
-    void enableAnalyticGradient(bool enable = true) { use_analytic_gradient = enable; }
-
-    /// Enable/disable analytic-vs-numerical gradient check logs.
-    void enableGradientCheck(bool enable = true) { gradient_check_enabled = enable; }
+    std::vector<Eigen::Quaterniond> solveWindowGN(const std::vector<Eigen::Quaterniond>& fixed_prefix_filtered = {});
 
 private:
-    static double objective(const std::vector<double>& x, std::vector<double>& grad, void* data);
-    static void constraint(unsigned m, double* result, unsigned n, const double* x, double* grad, void* data);
+    const std::vector<FrameData>* all_frames_;
+    std::vector<size_t> window_indices_;
+    Eigen::Matrix3d K;
+    Eigen::Matrix3d Kinv;
+    int width;
+    int height;
+    double crop_factor_h;
+    double crop_factor_v;
+    SolverConfig config_;
 
-    // Helper to convert from axis-angle (3 doubles) to quaternion
-    static Eigen::Quaterniond axisAngleToQuaternion(const Eigen::Vector3d& axis_angle);
+    size_t prefix_ = 0;
+    size_t N_ = 0;
+    std::vector<std::vector<Eigen::Vector2d>> fixed_boundary_;
+    Eigen::Vector3d corner_rays_[4];
+    double focal_length_ = 0.0;
+    std::vector<std::vector<double>> g_cached_;
+    std::vector<std::vector<Eigen::RowVector3d>> J_cached_;
 
-    // Helper to convert from quaternion to axis-angle
-    static Eigen::Vector3d quaternionToAxisAngle(const Eigen::Quaterniond& q);
-
-    // Analytic gradient computation (to be implemented by user)
-    void computeAnalyticGradient(const std::vector<double>& x, std::vector<double>& grad);
-
-    // Numerical gradient computation using finite differences
-    void computeNumericalGradient(const std::vector<double>& x, std::vector<double>& grad);
-
-    // Compute objective value for given optimization variables x
-    double computeObjectiveValue(const std::vector<double>& x);
-
-    std::vector<FrameData> initial_frame_data;
-    Eigen::Matrix3d K;                // Camera intrinsic matrix
-    int width;                        // Image width
-    int height;                       // Image height
-    double crop_factor_h;             // Horizontal crop factor
-    double crop_factor_v;             // Vertical crop factor
-
-    double lambda1, lambda2, lambda3, mu;
-    int iteration_count;
-    bool use_analytic_gradient;       // Flag to choose gradient method
-    bool gradient_check_enabled;      // Flag to compare analytic and numerical gradients
+    void precomputeBoundary(size_t prefix);
+    double evaluateSDF(const std::vector<Eigen::Quaterniond>& q_state);
+    void buildSmoothnessHessian(const std::vector<Eigen::Quaterniond>& q_state,
+                                Eigen::Ref<Eigen::MatrixXd> H,
+                                Eigen::Ref<Eigen::VectorXd> b);
+    void buildConstraintPenalty(double rho, double inv_f,
+                                const std::vector<std::vector<double>>& lambda,
+                                Eigen::Ref<Eigen::MatrixXd> H,
+                                Eigen::Ref<Eigen::VectorXd> b);
+    void verifyConstraints(const std::vector<Eigen::Quaterniond>& q_state);
 };
 
 #endif // OPTIMIZER_H

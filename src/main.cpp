@@ -5,14 +5,15 @@
 #include <vector>
 #include "DataLoader.h"
 #include "FileUtils.h"
+#include "ScopedTimer.h"
 #include "Optimizer.h"
 
 namespace {
 
 struct SlidingWindowConfig {
-    size_t core_frames = 100;   // emit + future
+    size_t core_frames = 45;   // emit + future
     size_t overlap_frames = 3;  // fixed prefix for alignment
-    size_t emit_frames = 70;    // output count per window
+    size_t emit_frames = 15;    // output count per window
 };
 
 void printUsage(const char* exe_name) {
@@ -59,10 +60,7 @@ int main(int argc, char** argv) {
     const std::string output_path = "../data/optimized_quaternions.csv";
 
     // Optimization parameters
-    const double lambda1 = 1.0;
-    const double lambda2 = 2.0;
-    const double lambda3 = 4.0;
-    const double mu = 0.25;
+    SolverConfig solver_config;
 
     SlidingWindowConfig window_cfg;
     for (int arg_idx = 1; arg_idx < argc; ++arg_idx) {
@@ -157,17 +155,12 @@ int main(int argc, char** argv) {
         const long long window_start = static_cast<long long>(next_emit_start) -
                                        static_cast<long long>(window_cfg.overlap_frames);
 
-        std::vector<FrameData> window_frames;
-        window_frames.reserve(total_window_frames);
+        std::vector<size_t> window_indices;
+        window_indices.reserve(total_window_frames);
         for (size_t local_idx = 0; local_idx < total_window_frames; ++local_idx) {
             long long source_idx = window_start + static_cast<long long>(local_idx);
-            if (source_idx < 0) {
-                source_idx = 0;
-            }
-            if (source_idx >= static_cast<long long>(frames.size())) {
-                source_idx = static_cast<long long>(frames.size()) - 1;
-            }
-            window_frames.push_back(frames[static_cast<size_t>(source_idx)]);
+            source_idx = std::max(0LL, std::min(source_idx, static_cast<long long>(frames.size()) - 1));
+            window_indices.push_back(static_cast<size_t>(source_idx));
         }
 
         std::vector<Eigen::Quaterniond> fixed_prefix;
@@ -188,17 +181,20 @@ int main(int argc, char** argv) {
         std::cout << "Window #" << (window_index + 1)
                   << " start=" << window_start
                   << " fixed_prefix=" << fixed_prefix.size()
-                  << " total_input=" << window_frames.size() << std::endl;
+                  << " total_input=" << window_indices.size() << std::endl;
 
-        Optimizer optimizer(window_frames,
+        PROFILE_SCOPE("Window #" + std::to_string(window_index + 1));
+
+        Optimizer optimizer(frames, std::move(window_indices),
                             loader.getCameraMatrix(),
                             loader.getWidth(),
                             loader.getHeight(),
                             loader.getCropFactorH(),
                             loader.getCropFactorV(),
-                            lambda1, lambda2, lambda3, mu);
+                            solver_config);
 
-        std::vector<Eigen::Quaterniond> optimized_window = optimizer.optimize(fixed_prefix);
+        // Phase 2: use GN solver
+        std::vector<Eigen::Quaterniond> optimized_window = optimizer.solveWindowGN(fixed_prefix);
         if (optimized_window.size() != total_window_frames) {
             std::cerr << "Optimization output size mismatch in window #" << (window_index + 1) << std::endl;
             return 1;

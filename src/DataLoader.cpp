@@ -2,34 +2,27 @@
 #include "DataLoader.h"
 #include <fstream>
 #include <iostream>
+#include <cmath>
 #include <sstream>
 
 DataLoader::DataLoader(const std::string& quat_path, const std::string& yaml_path, const std::string& rcs_path)
     : quat_file_path(quat_path), yaml_file_path(yaml_path), rcs_file_path(rcs_path),
       K(Eigen::Matrix3d::Zero()), width(0), height(0), crop_factor_h(0.0), crop_factor_v(0.0) {
-    std::cout << "DataLoader constructor called with paths:" << std::endl;
-    std::cout << "  Quaternion: " << quat_file_path << std::endl;
-    std::cout << "  YAML: " << yaml_file_path << std::endl;
-    std::cout << "  RCS: " << rcs_file_path << std::endl;
 }
 
 bool DataLoader::load() {
-    std::cout << "DataLoader::load() - Starting to load quaternion data..." << std::endl;
     if (!loadQuaternionData()) {
         std::cerr << "Error loading quaternion data." << std::endl;
         return false;
     }
-    std::cout << "DataLoader::load() - Quaternion data loaded, now loading YAML..." << std::endl;
     if (!loadYamlData()) {
         std::cerr << "Error loading YAML data." << std::endl;
         return false;
     }
-    std::cout << "DataLoader::load() - YAML data loaded, now loading RCS grid..." << std::endl;
     if (!loadRcsGridData()) {
         std::cerr << "Error loading RCS grid data." << std::endl;
         return false;
     }
-    std::cout << "DataLoader::load() - All data loaded successfully!" << std::endl;
     return true;
 }
 
@@ -58,24 +51,19 @@ double DataLoader::getCropFactorV() const {
 }
 
 bool DataLoader::loadQuaternionData() {
-    std::cout << "DEBUG: loadQuaternionData() - Opening file: " << quat_file_path << std::endl;
     std::ifstream file(quat_file_path);
     if (!file.is_open()) {
         std::cerr << "ERROR: Failed to open quaternion file: " << quat_file_path << std::endl;
         return false;
     }
-    std::cout << "DEBUG: File opened successfully" << std::endl;
 
     std::string line;
-    // Skip header
     if (!std::getline(file, line)) {
         std::cerr << "ERROR: Failed to read header from quaternion file." << std::endl;
         return false;
     }
-    std::cout << "DEBUG: Header skipped: " << line.substr(0, 50) << "..." << std::endl;
 
     size_t line_num = 1;
-    size_t frames_loaded = 0;
     while (std::getline(file, line)) {
         line_num++;
         std::stringstream ss(line);
@@ -83,10 +71,8 @@ bool DataLoader::loadQuaternionData() {
         double w = 0, x = 0, y = 0, z = 0;
         int count = 0;
 
-        // Skip time (first column)
         if (!std::getline(ss, token, ',')) continue;
 
-        // Parse quaternion components
         while (std::getline(ss, token, ',') && count < 4) {
             try {
                 double val = std::stod(token);
@@ -102,15 +88,16 @@ bool DataLoader::loadQuaternionData() {
         }
 
         if (count == 4) {
-            frame_data.push_back({Eigen::Quaterniond(w, x, y, z)});
-            frames_loaded++;
+            Eigen::Quaterniond q(w, x, y, z);
+            double n = q.norm();
+            if (n < 1e-6 || !std::isfinite(n)) {
+                std::cerr << "Line " << line_num << ": invalid quaternion (norm=" << n << ")" << std::endl;
+                return false;
+            }
+            frame_data.push_back({q.normalized()});
         } else {
             std::cerr << "Line " << line_num << ": expected 4 values but got " << count << std::endl;
             return false;
-        }
-        
-        if (frames_loaded % 100 == 0) {
-            std::cout << "DEBUG: Loaded " << frames_loaded << " frames so far..." << std::endl;
         }
     }
     
@@ -119,7 +106,7 @@ bool DataLoader::loadQuaternionData() {
         return false;
     }
     
-    std::cout << "DEBUG: Successfully loaded " << frame_data.size() << " quaternion frames." << std::endl;
+    std::cout << "Loaded " << frame_data.size() << " quaternion frames." << std::endl;
     return true;
 }
 
@@ -174,12 +161,12 @@ bool DataLoader::loadRcsGridData() {
         
         while (std::getline(ss, token, ',')) {
             try {
-                double x = std::stod(token) * width;
+                double x = std::stod(token) * (width - 1) / 2.0;
                 if (!std::getline(ss, token, ',')) {
                     std::cerr << "ERROR: Frame " << frame_idx << ": missing y coordinate for point " << point_count << std::endl;
                     return false;
                 }
-                double y = std::stod(token) * height;
+                double y = std::stod(token) * (height - 1) / 2.0;
                 frame_data[frame_idx].rcs_grid.push_back(Eigen::Vector2d(x, y));
                 point_count++;
             } catch (const std::exception& e) {
@@ -198,13 +185,16 @@ bool DataLoader::loadRcsGridData() {
         return false;
     }
     
-    // 11x11网格应该有121个点
     if (!frame_data.empty()) {
-        size_t points = frame_data[0].rcs_grid.size();
-        std::cout << "RCS grid loaded: " << points << " points per frame (expected 121 for 11x11 grid)" << std::endl;
-        if (points != 121) {
-            std::cout << "  Note: Config says gridCntH:11, gridCntV:11 (11x11=121)" << std::endl;
+        size_t expected = frame_data[0].rcs_grid.size();
+        for (size_t i = 1; i < frame_data.size(); ++i) {
+            if (frame_data[i].rcs_grid.size() != expected) {
+                std::cerr << "ERROR: Frame " << i << " has " << frame_data[i].rcs_grid.size()
+                          << " RCS points, expected " << expected << std::endl;
+                return false;
+            }
         }
+        std::cout << "RCS grid: " << expected << " points/frame, " << frame_data.size() << " frames" << std::endl;
     }
     
     return true;
