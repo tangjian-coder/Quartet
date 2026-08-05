@@ -13,12 +13,13 @@ public:
 
     bool load();
 
-    const std::vector<FrameData>& getFrameData() const;
-    const Eigen::Matrix3d& getCameraMatrix() const;
-    int getWidth() const;
-    int getHeight() const;
-    double getCropFactorH() const;
-    double getCropFactorV() const;
+    // Data members: read-only after load()
+    std::vector<FrameData> frame_data;
+    Eigen::Matrix3d K;                // Camera intrinsic matrix
+    int width;                        // Image width
+    int height;                       // Image height
+    double crop_factor_h;             // Horizontal crop factor
+    double crop_factor_v;             // Vertical crop factor
 
 private:
     bool loadQuaternionData();
@@ -28,13 +29,6 @@ private:
     std::string quat_file_path;
     std::string yaml_file_path;
     std::string rcs_file_path;
-
-    std::vector<FrameData> frame_data;
-    Eigen::Matrix3d K;                // Camera intrinsic matrix
-    int width;                        // Image width
-    int height;                       // Image height
-    double crop_factor_h;             // Horizontal crop factor
-    double crop_factor_v;             // Vertical crop factor
 };
 
 #endif // DATA_LOADER_H

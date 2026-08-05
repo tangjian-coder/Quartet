@@ -11,14 +11,14 @@
 namespace {
 
 struct SlidingWindowConfig {
-    size_t core_frames = 45;   // emit + future
-    size_t overlap_frames = 3;  // fixed prefix for alignment
-    size_t emit_frames = 15;    // output count per window
+    size_t anchor_frames = 3;    // frames shared with previous window (fixed prefix)
+    size_t output_frames = 15;   // frames emitted per window
+    size_t future_frames = 30;   // future frames for look-ahead smoothing
 };
 
 void printUsage(const char* exe_name) {
     std::cout << "Usage: " << exe_name
-              << " [--core-frames N] [--overlap-frames N] [--emit-frames N]" << std::endl;
+              << " [--anchor-frames N] [--output-frames N] [--future-frames N]" << std::endl;
 }
 
 bool parseSizeT(const std::string& value, size_t& out) {
@@ -59,9 +59,6 @@ int main(int argc, char** argv) {
     const std::string rcs_path = "../data/DbgFile_WarpGrids_RSCFRMMid.csv";
     const std::string output_path = "../data/optimized_quaternions.csv";
 
-    // Optimization parameters
-    SolverConfig solver_config;
-
     SlidingWindowConfig window_cfg;
     for (int arg_idx = 1; arg_idx < argc; ++arg_idx) {
         std::string arg = argv[arg_idx];
@@ -69,20 +66,20 @@ int main(int argc, char** argv) {
             printUsage(argv[0]);
             return 0;
         }
-        if (arg == "--core-frames") {
-            if (!readOptionValue(argc, argv, arg_idx, arg, window_cfg.core_frames)) {
+        if (arg == "--future-frames") {
+            if (!readOptionValue(argc, argv, arg_idx, arg, window_cfg.future_frames)) {
                 return 1;
             }
             continue;
         }
-        if (arg == "--overlap-frames") {
-            if (!readOptionValue(argc, argv, arg_idx, arg, window_cfg.overlap_frames)) {
+        if (arg == "--anchor-frames") {
+            if (!readOptionValue(argc, argv, arg_idx, arg, window_cfg.anchor_frames)) {
                 return 1;
             }
             continue;
         }
-        if (arg == "--emit-frames") {
-            if (!readOptionValue(argc, argv, arg_idx, arg, window_cfg.emit_frames)) {
+        if (arg == "--output-frames") {
+            if (!readOptionValue(argc, argv, arg_idx, arg, window_cfg.output_frames)) {
                 return 1;
             }
             continue;
@@ -93,44 +90,25 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (window_cfg.core_frames == 0) {
-        std::cerr << "core-frames must be > 0" << std::endl;
-        return 1;
-    }
-    if (window_cfg.emit_frames == 0) {
-        std::cerr << "emit-frames must be > 0" << std::endl;
-        return 1;
-    }
-    if (window_cfg.emit_frames > window_cfg.core_frames) {
-        std::cerr << "emit-frames must be <= core-frames" << std::endl;
+    if (window_cfg.output_frames == 0) {
+        std::cerr << "output-frames must be > 0" << std::endl;
         return 1;
     }
 
-    const size_t future_frames = window_cfg.core_frames - window_cfg.emit_frames;
-    const size_t total_window_frames = window_cfg.overlap_frames + window_cfg.core_frames;
+    const size_t total_window_frames = window_cfg.anchor_frames + window_cfg.output_frames + window_cfg.future_frames;
 
     std::cout << "Sliding window config:" << std::endl;
-    std::cout << "  overlap frames: " << window_cfg.overlap_frames << std::endl;
-    std::cout << "  emit frames: " << window_cfg.emit_frames << std::endl;
-    std::cout << "  future frames: " << future_frames << std::endl;
+    std::cout << "  anchor frames: " << window_cfg.anchor_frames << std::endl;
+    std::cout << "  output frames: " << window_cfg.output_frames << std::endl;
+    std::cout << "  future frames: " << window_cfg.future_frames << std::endl;
     std::cout << "  total input frames per window: " << total_window_frames << std::endl;
 
-    auto fileExists = [](const std::string& path) -> bool {
-        std::ifstream file(path);
-        return file.good();
-    };
-
-    if (!fileExists(quat_path)) {
-        std::cerr << "Quaternion file not found: " << quat_path << std::endl;
-        return 1;
-    }
-    if (!fileExists(yaml_path)) {
-        std::cerr << "YAML file not found: " << yaml_path << std::endl;
-        return 1;
-    }
-    if (!fileExists(rcs_path)) {
-        std::cerr << "RCS grid file not found: " << rcs_path << std::endl;
-        return 1;
+    // Check input files exist before loading.
+    for (const std::string& path : {quat_path, yaml_path, rcs_path}) {
+        if (!std::ifstream(path).good()) {
+            std::cerr << "File not found: " << path << std::endl;
+            return 1;
+        }
     }
 
     DataLoader loader(quat_path, yaml_path, rcs_path);
@@ -139,7 +117,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const auto& frames = loader.getFrameData();
+    const auto& frames = loader.frame_data;
     if (frames.empty()) {
         std::cerr << "No frames loaded." << std::endl;
         return 1;
@@ -149,69 +127,68 @@ int main(int argc, char** argv) {
     std::vector<Eigen::Quaterniond> optimized_quaternions;
     optimized_quaternions.reserve(frames.size());
 
+    // Optimization parameters for the GN+ALM solver.
+    const SolverConfig solver_config;
+
     size_t next_emit_start = 0;
-    size_t window_index = 0;
-    while (next_emit_start < frames.size()) {
-        const long long window_start = static_cast<long long>(next_emit_start) -
-                                       static_cast<long long>(window_cfg.overlap_frames);
+    for (size_t window_index = 0; next_emit_start < frames.size(); ++window_index) {
+        const bool first_window = (window_index == 0);
 
         std::vector<size_t> window_indices;
+        std::vector<Eigen::Quaterniond> fixed_prefix_quaternions;
         window_indices.reserve(total_window_frames);
-        for (size_t local_idx = 0; local_idx < total_window_frames; ++local_idx) {
-            long long source_idx = window_start + static_cast<long long>(local_idx);
-            source_idx = std::max(0LL, std::min(source_idx, static_cast<long long>(frames.size()) - 1));
-            window_indices.push_back(static_cast<size_t>(source_idx));
-        }
+        fixed_prefix_quaternions.reserve(window_cfg.anchor_frames);
 
-        std::vector<Eigen::Quaterniond> fixed_prefix;
-        fixed_prefix.reserve(window_cfg.overlap_frames);
-        if (window_cfg.overlap_frames > 0) {
-            if (window_index == 0) {
-                for (size_t i = 0; i < window_cfg.overlap_frames; ++i) {
-                    fixed_prefix.push_back(frames.front().orientation);
-                }
+        // Anchor region: the first `anchor_frames` frames are fixed (not optimized).
+        for (size_t i = 0; i < window_cfg.anchor_frames; ++i) {
+            if (first_window) {
+                fixed_prefix_quaternions.push_back(frames.front().orientation);
+                window_indices.push_back(0);              // clamp to frame 0
             } else {
-                const size_t fixed_global_start = next_emit_start - window_cfg.overlap_frames;
-                for (size_t i = 0; i < window_cfg.overlap_frames; ++i) {
-                    fixed_prefix.push_back(optimized_quaternions[fixed_global_start + i]);
-                }
+                const size_t anchor_idx = next_emit_start - window_cfg.anchor_frames + i;
+                fixed_prefix_quaternions.push_back(optimized_quaternions[anchor_idx]);
+                window_indices.push_back(anchor_idx);
             }
         }
 
+        // Core region: the next `output + future` frames, clamped at the tail.
+        for (size_t i = 0; i < window_cfg.output_frames + window_cfg.future_frames; ++i) {
+            const size_t idx = next_emit_start + i;
+            window_indices.push_back(idx < frames.size() ? idx : frames.size() - 1);
+        }
+
         std::cout << "Window #" << (window_index + 1)
-                  << " start=" << window_start
-                  << " fixed_prefix=" << fixed_prefix.size()
+                  << " fixed_prefix_quaternions=" << fixed_prefix_quaternions.size()
                   << " total_input=" << window_indices.size() << std::endl;
 
         PROFILE_SCOPE("Window #" + std::to_string(window_index + 1));
 
         Optimizer optimizer(frames, std::move(window_indices),
-                            loader.getCameraMatrix(),
-                            loader.getWidth(),
-                            loader.getHeight(),
-                            loader.getCropFactorH(),
-                            loader.getCropFactorV(),
+                            loader.K,
+                            loader.width,
+                            loader.height,
+                            loader.crop_factor_h,
+                            loader.crop_factor_v,
                             solver_config);
 
         // Phase 2: use GN solver
-        std::vector<Eigen::Quaterniond> optimized_window = optimizer.solveWindowGN(fixed_prefix);
+        std::vector<Eigen::Quaterniond> optimized_window = optimizer.solveWindowGN(fixed_prefix_quaternions);
         if (optimized_window.size() != total_window_frames) {
             std::cerr << "Optimization output size mismatch in window #" << (window_index + 1) << std::endl;
             return 1;
         }
 
-        const size_t emit_count = std::min(window_cfg.emit_frames, frames.size() - next_emit_start);
+        // Emit this window's frames (skipping the overlap anchor region) and advance the window
+        const size_t emit_count = std::min(window_cfg.output_frames, frames.size() - next_emit_start);
         for (size_t i = 0; i < emit_count; ++i) {
-            optimized_quaternions.push_back(optimized_window[window_cfg.overlap_frames + i]);
+            optimized_quaternions.push_back(optimized_window[window_cfg.anchor_frames + i]);
         }
-
         std::cout << "Window #" << (window_index + 1)
                   << " emitted=" << emit_count
                   << " total_emitted=" << optimized_quaternions.size()
                   << std::endl;
 
         next_emit_start += emit_count;
-        ++window_index;
     }
 
     if (optimized_quaternions.size() != frames.size()) {

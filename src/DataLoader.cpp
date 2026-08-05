@@ -26,30 +26,6 @@ bool DataLoader::load() {
     return true;
 }
 
-const std::vector<FrameData>& DataLoader::getFrameData() const {
-    return frame_data;
-}
-
-const Eigen::Matrix3d& DataLoader::getCameraMatrix() const {
-    return K;
-}
-
-int DataLoader::getWidth() const {
-    return width;
-}
-
-int DataLoader::getHeight() const {
-    return height;
-}
-
-double DataLoader::getCropFactorH() const {
-    return crop_factor_h;
-}
-
-double DataLoader::getCropFactorV() const {
-    return crop_factor_v;
-}
-
 bool DataLoader::loadQuaternionData() {
     std::ifstream file(quat_file_path);
     if (!file.is_open()) {
