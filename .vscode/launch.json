@@ -3,44 +3,22 @@
     "configurations": [
         {
             "name": "Debug",
-            "type": "cppdbg",
+            "type": "lldb",
             "request": "launch",
             "program": "${workspaceFolder}/build-debug/quaternion_optimizer",
             "args": [],
-            "stopAtEntry": false,
             "cwd": "${workspaceFolder}/build-debug",
-            "environment": [],
-            "externalConsole": false,
-            "MIMode": "gdb",
-            "miDebuggerPath": "/usr/bin/gdb",
-            "setupCommands": [
-                {
-                    "description": "Enable pretty-printing",
-                    "text": "-enable-pretty-printing",
-                    "ignoreFailures": true
-                }
-            ],
+            "console": "internalConsole",
             "preLaunchTask": "CMake Build (Debug)"
         },
         {
             "name": "Release",
-            "type": "cppdbg",
+            "type": "lldb",
             "request": "launch",
             "program": "${workspaceFolder}/build-release/quaternion_optimizer",
             "args": [],
-            "stopAtEntry": false,
             "cwd": "${workspaceFolder}/build-release",
-            "environment": [],
-            "externalConsole": false,
-            "MIMode": "gdb",
-            "miDebuggerPath": "/usr/bin/gdb",
-            "setupCommands": [
-                {
-                    "description": "Enable pretty-printing",
-                    "text": "-enable-pretty-printing",
-                    "ignoreFailures": true
-                }
-            ],
+            "console": "internalConsole",
             "preLaunchTask": "CMake Build (Release)"
         }
     ]
