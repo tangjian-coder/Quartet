@@ -17,6 +17,7 @@ struct SolverConfig {
     int max_outer = 5;
     int max_inner = 8;
     double outer_tol = 1e-4;
+    bool verbose = false;   // Print per-window solver diagnostics.
 };
 
 class Optimizer {

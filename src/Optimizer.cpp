@@ -99,10 +99,6 @@ Optimizer::Optimizer(const std::vector<FrameData>& all_frames,
       crop_factor_h(crop_factor_h),
       crop_factor_v(crop_factor_v),
       config_(config) {
-    std::cout << "Optimizer initialized with:" << std::endl;
-    std::cout << "  Image size: " << width << " x " << height << std::endl;
-    std::cout << "  Crop factors: H=" << crop_factor_h << ", V=" << crop_factor_v << std::endl;
-    std::cout << "  Camera matrix K:\n" << K << std::endl;
 }
 
 // -----------------------------------------------------------------------
@@ -118,8 +114,10 @@ void Optimizer::precomputeBoundary(size_t prefix) {
     for (size_t i = 0; i < N_; ++i) {
         fixed_boundary_[i].clear();
         fixed_boundary_[i].reserve(bidx.size());
-        for (size_t b : bidx)
-            fixed_boundary_[i].push_back((*all_frames_)[window_indices_[i]].rcs_grid[b]);
+        for (size_t b : bidx) {
+            const Eigen::Vector2d& grid_point = (*all_frames_)[window_indices_[i]].rcs_grid[b];
+            fixed_boundary_[i].push_back(grid_point);
+        }
     }
 
     double half_w = (width - 1) / 2.0;
@@ -138,26 +136,35 @@ void Optimizer::precomputeBoundary(size_t prefix) {
 // Evaluate SDF: reverse-warp corners -> fixed RCS boundary
 // -----------------------------------------------------------------------
 
+// Evaluate SDF constraints and cache values/Jacobians.
 double Optimizer::evaluateSDF(const std::vector<Eigen::Quaterniond>& q_state) {
     double max_viol = -1e10;
+    // Skip fixed anchor frames.
     for (size_t i = prefix_; i < N_; ++i) {
-        Eigen::Matrix3d R_fs = ((*all_frames_)[window_indices_[i]].orientation.normalized()
-                                * q_state[i].inverse().normalized()).toRotationMatrix();
+        // Relative raw/state rotation.
+        const Eigen::Quaterniond q_raw = (*all_frames_)[window_indices_[i]].orientation.normalized();
+        const Eigen::Quaterniond state_inv = q_state[i].inverse().normalized();
+        Eigen::Matrix3d R_fs = (q_raw * state_inv).toRotationMatrix();
 
         for (int j = 0; j < 4; ++j) {
+            // Warp one crop corner.
             Eigen::Vector3d y = R_fs * corner_rays_[j];
             double zz = y.z();
+            // Avoid division by zero.
             if (std::abs(zz) < 1e-6) zz = (zz >= 0.0 ? 1e-6 : -1e-6);
 
+            // Project to image coordinates.
             Eigen::Vector2d qp(focal_length_ * y.x() / zz, focal_length_ * y.y() / zz);
 
-            int ci = -1; double tr = 0;
+            int ci = -1;       // Closest edge.
+            double tr = 0.0;   // Unclamped edge parameter.
             double s = GeometryTools::signedDistanceFromPointToPolygon(qp, fixed_boundary_[i], &ci, &tr);
             g_cached_[i][j] = s;
             max_viol = std::max(max_viol, s);
 
             J_cached_[i][j].setZero();
             if (ci >= 0 && std::abs(s) > 1e-8) {
+                // Rebuild the closest boundary point.
                 size_t a = static_cast<size_t>(ci);
                 size_t b_next = (a + 1) % fixed_boundary_[i].size();
                 double tc = std::max(0.0, std::min(1.0, tr));
@@ -166,10 +173,12 @@ double Optimizer::evaluateSDF(const std::vector<Eigen::Quaterniond>& q_state) {
                 if (d > 1e-8) {
                     Eigen::Vector2d dg_dp = (qp - C) / d;
 
+                    // Perspective projection Jacobian.
                     Eigen::Matrix<double, 2, 3> Jproj;
                     Jproj << focal_length_ / zz, 0, -focal_length_ * y.x() / (zz * zz),
                              0, focal_length_ / zz, -focal_length_ * y.y() / (zz * zz);
 
+                    // Chain rule to the rotation increment.
                     J_cached_[i][j] = dg_dp.transpose() * Jproj * hat(y) * R_fs;
                 }
             }
@@ -182,12 +191,19 @@ double Optimizer::evaluateSDF(const std::vector<Eigen::Quaterniond>& q_state) {
 // Build smoothness + fidelity Hessian and gradient
 // -----------------------------------------------------------------------
 
+// Accumulate Gauss-Newton normal equations (H += J^T J, b += J^T r) for the
+// smoothness terms (velocity/accel/jerk) and the fidelity term.
+// Note: accel/jerk use finite differences of the first-order Lie-algebra
+// residual r_i to approximate 2nd/3rd derivatives; this drops O(||r||^2)
+// terms (BCH, adjoint transport, curvature) and is fine for small rotations.
+// Anchor frames (index < prefix) are fixed and skipped.
 void Optimizer::buildSmoothnessHessian(const std::vector<Eigen::Quaterniond>& q_state,
                                         Eigen::Ref<Eigen::MatrixXd> H,
                                         Eigen::Ref<Eigen::VectorXd> b) {
     size_t N = N_;
     size_t prefix = prefix_;
 
+    // Per-frame caches: velocity residual, right-Jacobian inverse, adjoint rotation.
     std::vector<Eigen::Vector3d> vel_r(N, Eigen::Vector3d::Zero());
     std::vector<Eigen::Matrix3d> JrInv(N, Eigen::Matrix3d::Identity());
     std::vector<Eigen::Matrix3d> Radj(N, Eigen::Matrix3d::Identity());
@@ -199,11 +215,12 @@ void Optimizer::buildSmoothnessHessian(const std::vector<Eigen::Quaterniond>& q_
         Radj[i - 1] = q_state[i - 1].inverse().toRotationMatrix();
     }
 
+    // d(vel_r[k]) / d(delta-theta) under a left perturbation of q_state.
     auto Jvel = [&](size_t k) -> Eigen::Matrix3d {
         return JrInv[k] * Radj[k - 1];
     };
 
-    // Velocity: lambda1 * ||r_i||^2
+    // Velocity: lambda1 * ||r_i||^2. r_i depends on q_i and q_{i-1} -> 2x2 = 4 blocks.
     for (size_t i = 1; i < N; ++i) {
         Eigen::Matrix3d J = Jvel(i);
         if (i >= prefix) {
@@ -224,10 +241,11 @@ void Optimizer::buildSmoothnessHessian(const std::vector<Eigen::Quaterniond>& q_
         }
     }
 
-    // Acceleration: lambda2 * ||r_i - r_{i-1}||^2
+    // Acceleration: lambda2 * ||r_i - r_{i-1}||^2. Depends on 3 frames -> 3x3 = 9 blocks.
     for (size_t i = 2; i < N; ++i) {
         Eigen::Vector3d acc = vel_r[i] - vel_r[i - 1];
         Eigen::Matrix3d Ji = Jvel(i), Ji1 = Jvel(i - 1);
+        // (frame index, d(acc)/d(that frame)); q_{i-1} appears in both r_i and r_{i-1}.
         struct FJ { int fi; Eigen::Matrix3d J; };
         FJ blocks[3] = {
             {static_cast<int>(i), Ji},
@@ -246,7 +264,7 @@ void Optimizer::buildSmoothnessHessian(const std::vector<Eigen::Quaterniond>& q_
         }
     }
 
-    // Jerk: lambda3 * ||r_i - 2r_{i-1} + r_{i-2}||^2
+    // Jerk: lambda3 * ||r_i - 2r_{i-1} + r_{i-2}||^2. Depends on 4 frames -> 4x4 = 16 blocks.
     for (size_t i = 3; i < N; ++i) {
         Eigen::Vector3d jerk = vel_r[i] - 2.0 * vel_r[i - 1] + vel_r[i - 2];
         Eigen::Matrix3d Ji = Jvel(i), Ji1 = Jvel(i - 1), Ji2 = Jvel(i - 2);
@@ -269,7 +287,7 @@ void Optimizer::buildSmoothnessHessian(const std::vector<Eigen::Quaterniond>& q_
         }
     }
 
-    // Fidelity: mu * ||Log(q_i^{-1} * q_target)||^2
+    // Fidelity: mu * ||Log(q_i^{-1} * q_target)||^2. Depends on a single frame -> 1 block.
     for (size_t i = prefix; i < N; ++i) {
         Eigen::Quaterniond target = (*all_frames_)[window_indices_[i]].orientation.normalized();
         Eigen::Quaterniond dq = q_state[i].inverse() * target;
@@ -325,7 +343,8 @@ void Optimizer::verifyConstraints(const std::vector<Eigen::Quaterniond>& q_state
     Eigen::Vector2d corners_img[4] = {{lpx,tpy},{rpx,tpy},{rpx,bpy},{lpx,bpy}};
 
     for (size_t i = 0; i < N_; ++i) {
-        Eigen::Quaterniond dq = q_state[i].inverse() * (*all_frames_)[window_indices_[i]].orientation.normalized();
+        const Eigen::Quaterniond q_raw = (*all_frames_)[window_indices_[i]].orientation.normalized();
+        Eigen::Quaterniond dq = q_state[i].inverse() * q_raw;
         dq.normalize();
         double da = 2.0 * std::acos(std::clamp(std::abs(dq.w()), -1.0, 1.0));
         if (da * 180.0 / pi > max_delta_deg) max_delta_deg = da * 180.0 / pi;
@@ -334,8 +353,10 @@ void Optimizer::verifyConstraints(const std::vector<Eigen::Quaterniond>& q_state
 
         std::vector<Eigen::Vector2d> warped;
         warped.reserve(boundary.size());
-        for (size_t b : boundary)
-            warped.push_back(GeometryTools::transformPoint((*all_frames_)[window_indices_[i]].rcs_grid[b], Ht));
+        for (size_t b : boundary) {
+            const Eigen::Vector2d& grid_point = (*all_frames_)[window_indices_[i]].rcs_grid[b];
+            warped.push_back(GeometryTools::transformPoint(grid_point, Ht));
+        }
 
         double max_sdf = -1e10;
         double frame_min_sdf = 1e10;
@@ -349,11 +370,15 @@ void Optimizer::verifyConstraints(const std::vector<Eigen::Quaterniond>& q_state
         if (frame_min_sdf < min_sdf_all) min_sdf_all = frame_min_sdf;
     }
 
-    std::cout << "  [Verify] " << N_ << " frames"
-              << " max_sdf=" << max_sdf_all
-              << " min_sdf=" << min_sdf_all
-              << " violations=" << viol_count
-              << " max_Δ=" << max_delta_deg << "°" << std::endl;
+    // Print full diagnostics for every frame when verbose is enabled.
+    if (config_.verbose) {
+        std::cout << "\t[Verify] " << N_ << " frames"
+                  << " max_sdf=" << max_sdf_all
+                  << " min_sdf=" << min_sdf_all
+                  << " violations=" << viol_count
+                  << " max_\u0394=" << max_delta_deg << "\u00b0"
+                  << " violated=" << (viol_count > 0 ? "YES" : "no") << std::endl;
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -372,8 +397,10 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
     int dof = static_cast<int>(N - prefix) * 3;
 
     std::vector<Eigen::Quaterniond> q_state(N);
-    for (size_t i = 0; i < N; ++i)
-        q_state[i] = (*all_frames_)[window_indices_[i]].orientation.normalized();
+    for (size_t i = 0; i < N; ++i) {
+        const Eigen::Quaterniond q_raw = (*all_frames_)[window_indices_[i]].orientation.normalized();
+        q_state[i] = q_raw;
+    }
     for (size_t i = 0; i < prefix; ++i)
         q_state[i] = fixed_prefix_filtered[i].normalized();
 
@@ -391,6 +418,7 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
         bool active_constraints = (max_viol > 0);
         double inv_f = 1.0 / focal_length_;
 
+        bool inner_stopped = false;
         for (int inner = 0; inner < config_.max_inner; ++inner) {
             Eigen::MatrixXd H = Eigen::MatrixXd::Zero(dof, dof);
             Eigen::VectorXd b = Eigen::VectorXd::Zero(dof);
@@ -401,13 +429,28 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
             for (int k = 0; k < dof; ++k) H(k, k) += 1e-6;
 
             Eigen::LDLT<Eigen::MatrixXd> ldlt(H);
-            if (ldlt.info() != Eigen::Success) break;
+            if (ldlt.info() != Eigen::Success) {
+                if (config_.verbose)
+                    std::cout << "\t[ALM =" << outer + 1 << " GN =" << inner + 1 << "]"<< "stop: LDLT decomposition failed" << std::endl;
+                inner_stopped = true;
+                break;
+            }
 
             Eigen::VectorXd dx = ldlt.solve(-b);
-            if (!dx.allFinite()) break;
+            if (!dx.allFinite()) {
+                if (config_.verbose)
+                    std::cout << "\t[ALM=" << outer + 1 << " GN=" << inner + 1 << "] stop: non-finite dx (NaN/Inf)" << std::endl;
+                inner_stopped = true;
+                break;
+            }
 
             double dx_norm = dx.norm();
-            if (dx_norm < 1e-6) break;
+            if (dx_norm < 1e-6) {
+                if (config_.verbose)
+                    std::cout << "\t[ALM=" << outer + 1 << " GN=" << inner + 1 << "] stop: converged (dx_norm=" << dx_norm << ")" << std::endl;
+                inner_stopped = true;
+                break;
+            }
 
             const double max_angle = std::acos(-1.0) / 6.0;
             for (size_t i = prefix; i < N; ++i) {
@@ -421,9 +464,14 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
             if (active_constraints && inner > 0)
                 evaluateSDF(q_state);
         }
+        if (!inner_stopped && config_.verbose)
+            std::cout << "\t[ALM=" << outer + 1 << "    [GN] stop: reached max_inner=" << config_.max_inner << std::endl;
 
         max_viol = evaluateSDF(q_state);
-        std::cout << "ALM outer " << outer << " max_viol=" << max_viol << " rho=" << rho << std::endl;
+        // Print ALM progress for every outer iteration when verbose is enabled.
+        if (config_.verbose) {
+            std::cout << " \t[ALM=" << outer + 1 << " max_viol=" << max_viol << " rho=" << rho << "]" << std::endl;
+        }
         if (max_viol < config_.outer_tol) break;
 
         for (size_t i = prefix; i < N; ++i) {

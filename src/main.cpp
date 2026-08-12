@@ -12,13 +12,13 @@ namespace {
 
 struct SlidingWindowConfig {
     size_t anchor_frames = 3;    // frames shared with previous window (fixed prefix)
-    size_t output_frames = 15;   // frames emitted per window
+    size_t output_frames = 15;   // frames output per window
     size_t future_frames = 30;   // future frames for look-ahead smoothing
 };
 
 void printUsage(const char* exe_name) {
     std::cout << "Usage: " << exe_name
-              << " [--anchor-frames N] [--output-frames N] [--future-frames N]" << std::endl;
+              << " [--anchor-frames N] [--output-frames N] [--future-frames N] [--verbose]" << std::endl;
 }
 
 bool parseSizeT(const std::string& value, size_t& out) {
@@ -51,6 +51,7 @@ bool readOptionValue(int argc, char** argv, int& index, const std::string& optio
 } // namespace
 
 int main(int argc, char** argv) {
+    // Flush output immediately so progress logs appear live.
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
 
@@ -60,6 +61,8 @@ int main(int argc, char** argv) {
     const std::string output_path = "../data/optimized_quaternions.csv";
 
     SlidingWindowConfig window_cfg;
+    bool verbose = false;
+    // Parse command-line options.
     for (int arg_idx = 1; arg_idx < argc; ++arg_idx) {
         std::string arg = argv[arg_idx];
         if (arg == "--help" || arg == "-h") {
@@ -82,6 +85,11 @@ int main(int argc, char** argv) {
             if (!readOptionValue(argc, argv, arg_idx, arg, window_cfg.output_frames)) {
                 return 1;
             }
+            continue;
+        }
+
+        if (arg == "--verbose") {
+            verbose = true;
             continue;
         }
 
@@ -123,15 +131,21 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::cout << "Loaded frame count: " << frames.size() << std::endl;
+    std::cout << "Camera: " << loader.width << "x" << loader.height
+              << " crop H=" << loader.crop_factor_h << " V=" << loader.crop_factor_v
+              << " f=" << loader.K(0, 0) << std::endl;
 
     std::vector<Eigen::Quaterniond> optimized_quaternions;
     optimized_quaternions.reserve(frames.size());
 
     // Optimization parameters for the GN+ALM solver.
-    const SolverConfig solver_config;
+    SolverConfig solver_config;
+    solver_config.verbose = verbose;
 
-    size_t next_emit_start = 0;
-    for (size_t window_index = 0; next_emit_start < frames.size(); ++window_index) {
+    // Sliding-window optimization: process `frames` in overlapping windows,
+    // each window = anchor + output + future frames; results accumulate in `optimized_quaternions`.
+    size_t next_output_start = 0;
+    for (size_t window_index = 0; next_output_start < frames.size(); ++window_index) {
         const bool first_window = (window_index == 0);
 
         std::vector<size_t> window_indices;
@@ -145,7 +159,7 @@ int main(int argc, char** argv) {
                 fixed_prefix_quaternions.push_back(frames.front().orientation);
                 window_indices.push_back(0);              // clamp to frame 0
             } else {
-                const size_t anchor_idx = next_emit_start - window_cfg.anchor_frames + i;
+                const size_t anchor_idx = next_output_start - window_cfg.anchor_frames + i;
                 fixed_prefix_quaternions.push_back(optimized_quaternions[anchor_idx]);
                 window_indices.push_back(anchor_idx);
             }
@@ -153,13 +167,9 @@ int main(int argc, char** argv) {
 
         // Core region: the next `output + future` frames, clamped at the tail.
         for (size_t i = 0; i < window_cfg.output_frames + window_cfg.future_frames; ++i) {
-            const size_t idx = next_emit_start + i;
+            const size_t idx = next_output_start + i;
             window_indices.push_back(idx < frames.size() ? idx : frames.size() - 1);
         }
-
-        std::cout << "Window #" << (window_index + 1)
-                  << " fixed_prefix_quaternions=" << fixed_prefix_quaternions.size()
-                  << " total_input=" << window_indices.size() << std::endl;
 
         PROFILE_SCOPE("Window #" + std::to_string(window_index + 1));
 
@@ -172,23 +182,23 @@ int main(int argc, char** argv) {
                             solver_config);
 
         // Phase 2: use GN solver
+        std::cout << "Window #" << (window_index + 1) << std::endl;
         std::vector<Eigen::Quaterniond> optimized_window = optimizer.solveWindowGN(fixed_prefix_quaternions);
         if (optimized_window.size() != total_window_frames) {
             std::cerr << "Optimization output size mismatch in window #" << (window_index + 1) << std::endl;
             return 1;
         }
 
-        // Emit this window's frames (skipping the overlap anchor region) and advance the window
-        const size_t emit_count = std::min(window_cfg.output_frames, frames.size() - next_emit_start);
-        for (size_t i = 0; i < emit_count; ++i) {
+        // Output this window's frames (skipping the anchor region) and advance the window
+        const size_t output_count = std::min(window_cfg.output_frames, frames.size() - next_output_start);
+        for (size_t i = 0; i < output_count; ++i) {
             optimized_quaternions.push_back(optimized_window[window_cfg.anchor_frames + i]);
         }
-        std::cout << "Window #" << (window_index + 1)
-                  << " emitted=" << emit_count
-                  << " total_emitted=" << optimized_quaternions.size()
-                  << std::endl;
+        std::cout << "Output=" << output_count
+                  << " Total_output=" << optimized_quaternions.size()
+                  << "\n" << std::endl;
 
-        next_emit_start += emit_count;
+        next_output_start += output_count;
     }
 
     if (optimized_quaternions.size() != frames.size()) {
