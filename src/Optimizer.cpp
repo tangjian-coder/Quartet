@@ -373,11 +373,11 @@ void Optimizer::verifyConstraints(const std::vector<Eigen::Quaterniond>& q_state
     // Print full diagnostics for every frame when verbose is enabled.
     if (config_.verbose) {
         std::cout << "\t[Verify] " << N_ << " frames"
-                  << " max_sdf=" << max_sdf_all
-                  << " min_sdf=" << min_sdf_all
-                  << " violations=" << viol_count
-                  << " max_\u0394=" << max_delta_deg << "\u00b0"
-                  << " violated=" << (viol_count > 0 ? "YES" : "no") << std::endl;
+                  << " | max_sdf=" << max_sdf_all
+                  << " | min_sdf=" << min_sdf_all
+                  << " | violations=" << viol_count
+                  << " | max_\u0394=" << max_delta_deg << "\u00b0"
+                  << " | violated=" << (viol_count > 0 ? "YES" : "no") << std::endl;
     }
 }
 
@@ -431,7 +431,7 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
             Eigen::LDLT<Eigen::MatrixXd> ldlt(H);
             if (ldlt.info() != Eigen::Success) {
                 if (config_.verbose)
-                    std::cout << "\t[ALM =" << outer + 1 << " GN =" << inner + 1 << "]"<< "stop: LDLT decomposition failed" << std::endl;
+                    std::cout << "\t[ALM=" << outer + 1 << " | GN=" << inner + 1 << "] stop: LDLT decomposition failed" << std::endl;
                 inner_stopped = true;
                 break;
             }
@@ -439,7 +439,7 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
             Eigen::VectorXd dx = ldlt.solve(-b);
             if (!dx.allFinite()) {
                 if (config_.verbose)
-                    std::cout << "\t[ALM=" << outer + 1 << " GN=" << inner + 1 << "] stop: non-finite dx (NaN/Inf)" << std::endl;
+                    std::cout << "\t[ALM=" << outer + 1 << " | GN=" << inner + 1 << "] stop: non-finite dx (NaN/Inf)" << std::endl;
                 inner_stopped = true;
                 break;
             }
@@ -447,7 +447,7 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
             double dx_norm = dx.norm();
             if (dx_norm < 1e-6) {
                 if (config_.verbose)
-                    std::cout << "\t[ALM=" << outer + 1 << " GN=" << inner + 1 << "] stop: converged (dx_norm=" << dx_norm << ")" << std::endl;
+                    std::cout << "\t[ALM=" << outer + 1 << " | GN=" << inner + 1 << "] stop: converged (dx_norm=" << dx_norm << ")" << std::endl;
                 inner_stopped = true;
                 break;
             }
@@ -465,12 +465,12 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
                 evaluateSDF(q_state);
         }
         if (!inner_stopped && config_.verbose)
-            std::cout << "\t[ALM=" << outer + 1 << "    [GN] stop: reached max_inner=" << config_.max_inner << std::endl;
+            std::cout << "\t[ALM=" << outer + 1 << " | GN=" << config_.max_inner << "] stop: reached max_inner=" << config_.max_inner << std::endl;
 
         max_viol = evaluateSDF(q_state);
         // Print ALM progress for every outer iteration when verbose is enabled.
         if (config_.verbose) {
-            std::cout << " \t[ALM=" << outer + 1 << " max_viol=" << max_viol << " rho=" << rho << "]" << std::endl;
+            std::cout << "\t[ALM=" << outer + 1 << " | max_viol=" << max_viol << " | rho=" << rho << "]" << std::endl;
         }
         if (max_viol < config_.outer_tol) break;
 
