@@ -344,7 +344,9 @@ void Optimizer::verifyConstraints(const std::vector<Eigen::Quaterniond>& q_state
 
     for (size_t i = 0; i < N_; ++i) {
         const Eigen::Quaterniond q_raw = (*all_frames_)[window_indices_[i]].orientation.normalized();
-        Eigen::Quaterniond dq = q_state[i].inverse() * q_raw;
+        // Forward-warp must use the inverse of evaluateSDF's R_fs = q_raw * q_state^-1,
+        // i.e. q_state * q_raw^-1, so the boundary is warped the opposite way to the corners.
+        Eigen::Quaterniond dq = q_state[i] * q_raw.inverse();
         dq.normalize();
         double da = 2.0 * std::acos(std::clamp(std::abs(dq.w()), -1.0, 1.0));
         if (da * 180.0 / pi > max_delta_deg) max_delta_deg = da * 180.0 / pi;
