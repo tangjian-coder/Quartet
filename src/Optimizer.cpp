@@ -323,6 +323,45 @@ void Optimizer::buildConstraintPenalty(double rho, double inv_f,
 }
 
 // -----------------------------------------------------------------------
+// Evaluate augmented objective Phi = 0.5||R||^2 (diagnostics only)
+// -----------------------------------------------------------------------
+
+double Optimizer::evaluateObjective(const std::vector<Eigen::Quaterniond>& q_state,
+                                    double rho, double inv_f,
+                                    const std::vector<std::vector<double>>& lambda) {
+    size_t N = N_;
+    size_t prefix = prefix_;
+
+    std::vector<Eigen::Vector3d> vel_r(N, Eigen::Vector3d::Zero());
+    for (size_t i = 1; i < N; ++i)
+        vel_r[i] = logMap((q_state[i - 1].inverse() * q_state[i]).normalized());
+
+    double phi = 0.0;
+    // Smoothness residuals (weights are the squared-norm coefficients).
+    for (size_t i = 1; i < N; ++i)
+        phi += config_.lambda1 * vel_r[i].squaredNorm();
+    for (size_t i = 2; i < N; ++i)
+        phi += config_.lambda2 * (vel_r[i] - vel_r[i - 1]).squaredNorm();
+    for (size_t i = 3; i < N; ++i)
+        phi += config_.lambda3 * (vel_r[i] - 2.0 * vel_r[i - 1] + vel_r[i - 2]).squaredNorm();
+    // Fidelity residuals.
+    for (size_t i = prefix; i < N; ++i) {
+        Eigen::Quaterniond target = (*all_frames_)[window_indices_[i]].orientation.normalized();
+        Eigen::Quaterniond dq = q_state[i].inverse() * target;
+        dq.normalize();
+        phi += config_.mu * logMap(dq).squaredNorm();
+    }
+    // Constraint penalty rho * [g + lambda/rho]_+^2 (uses cached g).
+    for (size_t i = prefix; i < N; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            double a = std::max(0.0, g_cached_[i][j] * inv_f + lambda[i - prefix][j] / rho);
+            phi += rho * a * a;
+        }
+    }
+    return 0.5 * phi;
+}
+
+// -----------------------------------------------------------------------
 // Verify constraints using forward-warp cross-check
 // -----------------------------------------------------------------------
 
@@ -420,6 +459,8 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
         bool active_constraints = (max_viol > 0);
         double inv_f = 1.0 / focal_length_;
 
+        double phi_prev = 0.0;
+        bool have_prev = false;
         bool inner_stopped = false;
         for (int inner = 0; inner < config_.max_inner; ++inner) {
             Eigen::MatrixXd H = Eigen::MatrixXd::Zero(dof, dof);
@@ -429,6 +470,15 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
             buildConstraintPenalty(rho, inv_f, lambda, H, b);
 
             for (int k = 0; k < dof; ++k) H(k, k) += 1e-6;
+
+            // Diagnostics (computed, not used as stop criteria):
+            // |JtR| = ||J_R^T R|| (gradient/one-order optimality), dPhi = objective decrease.
+            double grad_norm = b.norm();
+            double phi_cur = 0.0, dphi = 0.0;
+            if (config_.verbose) {
+                phi_cur = evaluateObjective(q_state, rho, inv_f, lambda);
+                dphi = have_prev ? (phi_prev - phi_cur) : 0.0;
+            }
 
             Eigen::LDLT<Eigen::MatrixXd> ldlt(H);
             if (ldlt.info() != Eigen::Success) {
@@ -447,12 +497,20 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
             }
 
             double dx_norm = dx.norm();
+
+            // Print the three convergence indicators every inner iteration (|d|, dPhi, |JtR|).
+            if (config_.verbose)
+                std::cout << "\t[ALM=" << outer + 1 << " | GN=" << inner + 1 << "]"
+                          << " |d|=" << dx_norm << " | dPhi=" << dphi << " | |JtR|=" << grad_norm;
+
             if (dx_norm < 1e-6) {
                 if (config_.verbose)
-                    std::cout << "\t[ALM=" << outer + 1 << " | GN=" << inner + 1 << "] stop: converged (dx_norm=" << dx_norm << ")" << std::endl;
+                    std::cout << " -> converged" << std::endl;
                 inner_stopped = true;
                 break;
             }
+            if (config_.verbose)
+                std::cout << std::endl;
 
             const double max_angle = std::acos(-1.0) / 6.0;
             for (size_t i = prefix; i < N; ++i) {

@@ -52,6 +52,10 @@ private:
 
     void precomputeBoundary(size_t prefix);
     double evaluateSDF(const std::vector<Eigen::Quaterniond>& q_state);
+    // Augmented objective Phi = 0.5||R||^2 (smoothness + fidelity + constraint penalty), for diagnostics.
+    double evaluateObjective(const std::vector<Eigen::Quaterniond>& q_state,
+                             double rho, double inv_f,
+                             const std::vector<std::vector<double>>& lambda);
     void buildSmoothnessHessian(const std::vector<Eigen::Quaterniond>& q_state,
                                 Eigen::Ref<Eigen::MatrixXd> H,
                                 Eigen::Ref<Eigen::VectorXd> b);
