@@ -16,7 +16,9 @@ struct SolverConfig {
     double gamma = 1.5;
     int max_outer = 5;
     int max_inner = 8;
-    double outer_tol = 1e-4;
+    double eps_feas = 1e-6;   // Outer KKT: feasibility  ||[g]+||
+    double eps_stat = 1.0;    // Outer KKT: stationarity ||J_r^T r + J_g^T lambda||
+    double eps_comp = 1e-2;   // Outer KKT: complementarity ||lambda (.) g||
     bool verbose = false;   // Print per-window solver diagnostics.
 };
 

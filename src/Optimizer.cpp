@@ -521,18 +521,47 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
                 q_state[i] = (expMap(d) * q_state[i]).normalized();
             }
 
+            phi_prev = phi_cur;
+            have_prev = true;
+
             if (active_constraints && inner > 0)
                 evaluateSDF(q_state);
         }
         if (!inner_stopped && config_.verbose)
-            std::cout << "\t[ALM=" << outer + 1 << " | GN=" << config_.max_inner << "] stop: reached max_inner=" << config_.max_inner << std::endl;
+            std::cout << "\t[ALM=" << outer + 1 << " | GN=" << config_.max_inner << "] -> reached max_inner=" << config_.max_inner << std::endl;
 
         max_viol = evaluateSDF(q_state);
-        // Print ALM progress for every outer iteration when verbose is enabled.
+
+        // KKT errors on (x^{k+1}, lambda^{k+1}), used as the outer stop criteria.
+        // e_feas: feasibility ||[g]+||_inf; e_stat: ||J_r^T r + J_g^T lambda||; e_comp: ||lambda (.) g||.
+        Eigen::MatrixXd Hs = Eigen::MatrixXd::Zero(dof, dof);
+        Eigen::VectorXd stat = Eigen::VectorXd::Zero(dof);
+        buildSmoothnessHessian(q_state, Hs, stat);   // stat starts as J_r^T r (smoothness + fidelity)
+        double e_feas = 0.0, e_comp2 = 0.0;
+        for (size_t i = prefix; i < N; ++i) {
+            int ii = static_cast<int>(i - prefix) * 3;
+            for (int j = 0; j < 4; ++j) {
+                double g = g_cached_[i][j] * inv_f;
+                double lam_new = std::max(0.0, lambda[i - prefix][j] + rho * g);   // lambda^{k+1}
+                Eigen::RowVector3d Jc = J_cached_[i][j] * inv_f;
+                stat.segment<3>(ii) += lam_new * Jc.transpose();                   // + J_g^T lambda
+                e_feas = std::max(e_feas, std::max(0.0, g));
+                double c = lam_new * g;
+                e_comp2 += c * c;
+            }
+        }
+        double e_stat = stat.norm();
+        double e_comp = std::sqrt(e_comp2);
+
         if (config_.verbose) {
             std::cout << "\t[ALM=" << outer + 1 << " | max_viol=" << max_viol << " | rho=" << rho << "]" << std::endl;
+            std::cout << "\t[ALM=" << outer + 1 << " KKT] e_feas=" << e_feas
+                      << " | e_stat=" << e_stat << " | e_comp=" << e_comp << std::endl;
         }
-        if (max_viol < config_.outer_tol) break;
+
+        // Stop when all three KKT errors are within tolerance.
+        if (e_feas < config_.eps_feas && e_stat < config_.eps_stat && e_comp < config_.eps_comp)
+            break;
 
         for (size_t i = prefix; i < N; ++i) {
             int act_i = static_cast<int>(i - prefix);
