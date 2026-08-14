@@ -459,8 +459,12 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
         bool active_constraints = (max_viol > 0);
         double inv_f = 1.0 / focal_length_;
 
+        // Augmented objective at the point entering the inner loop; serves as the
+        // baseline so the first inner step already has a valid dPhi.
         double phi_prev = 0.0;
-        bool have_prev = false;
+        if (config_.verbose)
+            phi_prev = evaluateObjective(q_state, rho, inv_f, lambda);
+
         bool inner_stopped = false;
         for (int inner = 0; inner < config_.max_inner; ++inner) {
             Eigen::MatrixXd H = Eigen::MatrixXd::Zero(dof, dof);
@@ -470,15 +474,6 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
             buildConstraintPenalty(rho, inv_f, lambda, H, b);
 
             for (int k = 0; k < dof; ++k) H(k, k) += 1e-6;
-
-            // Diagnostics (computed, not used as stop criteria):
-            // |JtR| = ||J_R^T R|| (gradient/one-order optimality), dPhi = objective decrease.
-            double grad_norm = b.norm();
-            double phi_cur = 0.0, dphi = 0.0;
-            if (config_.verbose) {
-                phi_cur = evaluateObjective(q_state, rho, inv_f, lambda);
-                dphi = have_prev ? (phi_prev - phi_cur) : 0.0;
-            }
 
             Eigen::LDLT<Eigen::MatrixXd> ldlt(H);
             if (ldlt.info() != Eigen::Success) {
@@ -496,7 +491,33 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
                 break;
             }
 
+            // Manifold update q <- exp(d) * q for each free frame, with a per-step
+            // trust region: clamp each rotation increment to 30 deg. This mutates
+            // q_state from q_k to q_{k+1}; b above stays built from q_k.
+            const double max_angle = std::acos(-1.0) / 6.0;
+            for (size_t i = prefix; i < N; ++i) {
+                int ii = static_cast<int>(i - prefix) * 3;
+                Eigen::Vector3d d = dx.segment<3>(ii);
+                double d_norm = d.norm();
+                if (d_norm > max_angle) d *= max_angle / d_norm;
+                q_state[i] = (expMap(d) * q_state[i]).normalized();
+            }
+
             double dx_norm = dx.norm();
+
+            // Convergence indicators (diagnostics only, never used as stop criteria).
+            // Since b is not rebuilt after the update:
+            //   |JtR| = ||b||                  gradient at this step's START q_k
+            //   dPhi  = Phi(q_k) - Phi(q_{k+1})  this step's actual objective decrease
+            //   |d|   = ||dx||                 this step's length
+            // The end point q_{k+1}'s gradient appears as |JtR| on the next line;
+            // only the very last step's end gradient is never printed.
+            double grad_norm = b.norm();
+            double phi_cur = 0.0, dphi = 0.0;
+            if (config_.verbose) {
+                phi_cur = evaluateObjective(q_state, rho, inv_f, lambda);
+                dphi = phi_prev - phi_cur;
+            }
 
             // Print the three convergence indicators every inner iteration (|d|, dPhi, |JtR|).
             if (config_.verbose)
@@ -512,17 +533,7 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
             if (config_.verbose)
                 std::cout << std::endl;
 
-            const double max_angle = std::acos(-1.0) / 6.0;
-            for (size_t i = prefix; i < N; ++i) {
-                int ii = static_cast<int>(i - prefix) * 3;
-                Eigen::Vector3d d = dx.segment<3>(ii);
-                double d_norm = d.norm();
-                if (d_norm > max_angle) d *= max_angle / d_norm;
-                q_state[i] = (expMap(d) * q_state[i]).normalized();
-            }
-
-            phi_prev = phi_cur;
-            have_prev = true;
+            phi_prev = phi_cur;   // carry Phi(q_{k+1}) as the next step's baseline
 
             if (active_constraints && inner > 0)
                 evaluateSDF(q_state);
