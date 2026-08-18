@@ -23,11 +23,11 @@ r_i = Log(q_{i-1}^{-1} * q_i) ∈ R³         i ≥ 1
 增量 `δ_i` 下的导数（右雅可比逆）：
 
 ```
-∂r_i/∂δ_i = Jr^{-1}(r_i) * Ad(q_{i-1}^{-1})
-           = Jr^{-1}(r_i) * R_{i-1}^T
-
-∂r_i/∂δ_{i-1} = -Jr^{-1}(r_i) * R_{i-1}^T
+∂r_i/∂δ_i = Jr^{-1}(r_i) * R_i^T
+∂r_i/∂δ_{i-1} = -Jr^{-1}(r_i) * R_i^T
 ```
+
+（左扰动 `q_i <- Exp(δ_i) q_i` 时，共轭作用来自被扰动的当前帧 `R_i^T`，而非前一帧。）
 
 其中 `Jr^{-1}(φ)` 为 SO(3) **右**雅可比逆：
 
@@ -58,38 +58,34 @@ b(a)   += w · J_a^T r
 
 ## 4. SDF 约束：图像空间链式法则
 
-约束函数：`g(x) = max_j SDF(corner[j], warped_polygon) ≤ 0`
+约束函数：每个裁剪角一个约束 `g_j = SDF(corner[j], warped_polygon) ≤ 0`（分别存乘子 `λ_j`、分别累加 penalty，非 max 聚合）。
 
 ### 4.1 前向计算
 
 ```
-delta_aa = Log(q_state^{-1} * q_orig)      # 修正旋转的轴角
-R_dq = Exp(delta_aa)                        # 旋转矩阵
-H = K * R_dq * K^{-1}                       # 单应变换
+# evaluateSDF（优化侧，反向变换裁剪角到固定边界）
+R_fs = R_raw * R_state^{-1}              # 相对旋转
+y = R_fs * ray_j                         # 角点方向向量
+qp = (f·y_x/y_z, f·y_y/y_z)              # 投影到像素
+g_j = SDF(qp, fixed_boundary)            # 与固定边界比（像素级）
 
-warped[k] = H * rcs_grid[boundary[k]]       # 变换 RCS 边界
-g = max_j SDF(corner[j], {warped})          # 约束值
+# verifyConstraints（验证侧，正向变换边界）
+dq = q_state * q_raw^{-1}                # 反向相对旋转
+warped[k] = K * R_dq * K^{-1} * rcs_grid[boundary[k]]
+g_j = SDF(corner[j], {warped})           # 与固定角点比
 ```
 
 ### 4.2 梯度链
 
-从图像空间 SDF 梯度到优化变量 `δ` 的完整链：
+从图像空间 SDF 梯度到优化变量 `δ` 的完整链（evaluateSDF 实现）：
 
 ```
-∂SDF/∂(像素点) = sign * (P - closest_point) / distance
-
-∂(像素点)/∂H  = 顶点链 (computeVertexChain)
-  h = H * point_homogeneous
-  ∂v/∂H = [gx/hz, gy/hz, -(gx·vx + gy·vy)/hz] * point_homogeneous^T
-
-∂H/∂R = K^T ⊗ K^{-T}                        (DC/DR = K^T * ∂c/∂H * K^{-1})
-
-∂R/∂x = -[R * M]_×                           (skew 反算)
-  M = (∂c/∂R) * R_dq^T
-  ∂c/∂x = Jℓ(δ_aa)^T * skewInv(M)
+J_cached = dg_dp^T * Jproj * [y]_× * R_fs
+dg_dp    = sign * (P - closest_point) / distance      # sign：内部(-) 外部(+)
+Jproj    = ∂qp/∂y                                      # 透视投影雅可比
+y        = R_fs * ray                                   # 角点方向向量
+∂y/∂δ    = [y]_× * R_fs                                 # 左扰动 q_state
 ```
-
-最终：`∂g/∂δ = ∂c/∂x`（左雅可比 Jℓ 的转置乘反对称反算）。
 
 ### 4.3 ALM penalty 项
 
@@ -97,7 +93,7 @@ g = max_j SDF(corner[j], {warped})          # 约束值
 
 ```
 μ_eff = max(0, λ + ρ * g)                   # 有效乘子
-b -= μ_eff * J^T                             # 惩罚梯度（-J 方向减小 g）
+b += μ_eff * J^T                             # 惩罚梯度（正号）
 H += ρ * J^T * J                             # 惩罚 Hessian
 ```
 

@@ -31,8 +31,8 @@
 
 ```
 r_i = Log(q_{i-1}^{-1} * q_i)              i ≥ 1
-∂r_i/∂δ_i = Jr^{-1}(r_i) * R_{i-1}^T
-∂r_i/∂δ_{i-1} = -Jr^{-1}(r_i) * R_{i-1}^T
+∂r_i/∂δ_i = Jr^{-1}(r_i) * R_i^T
+∂r_i/∂δ_{i-1} = -Jr^{-1}(r_i) * R_i^T
 ```
 
 目标项：`λ₁ * ||r_i||²`，GN 贡献 `H += λ₁·J^T J`，`b += λ₁·J^T r`。
@@ -60,7 +60,7 @@ jerk_i = r_i - 2 r_{i-1} + r_{i-2}        i ≥ 3
 
 ```
 r_f_i = Log(q_i^{-1} * q_orig_i)
-J_f_i = -Jr^{-1}(r_f_i) * R_i^T
+J_f_i = -Jr^{-1}(r_f_i) * R_orig_i^T
 ```
 
 目标项：`μ * ||r_f_i||²`。
@@ -69,18 +69,20 @@ J_f_i = -Jr^{-1}(r_f_i) * R_i^T
 
 约束不等式 `g ≤ 0`，其中 `g` 为 SDF（正 = 边界外）。
 
-**约束计算**：
+**约束计算**（evaluateSDF，反向变换裁剪角到固定边界）：
 
-1. 计算修正旋转：`R_dq = (q_state[i]^{-1} * q_orig[i])` 的旋转矩阵
-2. 变换 RCS 边界：`warped[k] = K * R_dq * K^{-1} * rcs_grid[boundary[k]]`
-3. 对 4 个裁剪角点 `c[j]`，计算 `SDF(c[j], warped_polygon)`
-4. 梯度链：`∂SDF/∂像素 → ∂像素/∂H → ∂H/∂R → ∂R/∂δ`
+1. 相对旋转：`R_fs = R_q_raw * R_q_state^{-1}`
+2. 对每个裁剪角：方向向量 `y = R_fs * ray_j`，投影到像素 `qp = (f·y_x/y_z, f·y_y/y_z)`
+3. 约束值 `g_j = SDF(qp, fixed_boundary)`（像素级，使用时乘 `1/f` 归一化）
+4. 梯度链（左扰动 q_state）：`∂g/∂δ = dg_dp^T * Jproj * [y]_× * R_fs`
+
+（verifyConstraints 验证侧方向相反：`dq = q_state * q_raw^{-1}`，`Ht = K * R_dq * K^{-1}`，正向变换 RCS 边界后与固定角点比 SDF。）
 
 **ALM penalty**（在 GN 内循环中每帧每角添加）：
 
 ```
 μ_eff = max(0, λ + ρ * g)                  λ: 乘子, ρ: 惩罚参数
-b -= μ_eff * J^T                           惩罚梯度
+b += μ_eff * J^T                           惩罚梯度（正号，J^T 指向增 g 方向）
 H += ρ * J^T * J                           惩罚 Hessian
 ```
 
@@ -91,7 +93,15 @@ H += ρ * J^T * J                           惩罚 Hessian
 ρ ← min(ρ * γ, ρ_max)                     惩罚递增
 ```
 
-收敛条件：`max_viol < 1e-4`。
+收敛条件（外层停止，三 KKT 误差全达标）：
+
+```
+e_feas < 1e-6     （可行性：max[g]+）
+e_stat < 1.0      （平稳性：||J_r^T r + J_g^T λ||）
+e_comp < 1e-2     （互补松弛：||λ ⊙ g||）
+```
+
+另有 `max_outer` 轮次上限兜底。
 
 ## 4. 坐标系
 
