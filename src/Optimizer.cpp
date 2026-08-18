@@ -462,7 +462,6 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
     double max_viol = evaluateSDF(q_state);
 
     for (int outer = 0; outer < config_.max_outer; ++outer) {
-        bool active_constraints = (max_viol > 0);
         double inv_f = 1.0 / focal_length_;
 
         // Augmented objective at the point entering the inner loop; serves as the
@@ -509,6 +508,12 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
                 q_state[i] = (expMap(d) * q_state[i]).normalized();
             }
 
+            // Refresh the SDF cache right after the state update, unconditionally,
+            // so the next build and the objective diagnostics below both see g/J
+            // at q_{k+1}. This keeps the constraint and smoothness terms on the
+            // same state (the penalty may be active via mu_eff even when max_viol<=0).
+            evaluateSDF(q_state);
+
             double dx_norm = dx.norm();
 
             // Convergence indicators (diagnostics only, never used as stop criteria).
@@ -540,9 +545,6 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
                 std::cout << std::endl;
 
             phi_prev = phi_cur;   // carry Phi(q_{k+1}) as the next step's baseline
-
-            if (active_constraints && inner > 0)
-                evaluateSDF(q_state);
         }
         if (!inner_stopped && config_.verbose)
             std::cout << "\t[ALM=" << outer + 1 << " | GN=" << config_.max_inner << "] -> reached max_inner=" << config_.max_inner << std::endl;
