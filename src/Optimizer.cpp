@@ -537,15 +537,12 @@ void Optimizer::verifyConstraints(const std::vector<Eigen::Quaterniond>& q_state
         if (frame_min_sdf < min_sdf_all) min_sdf_all = frame_min_sdf;
     }
 
-    // Print full diagnostics for every frame when verbose is enabled.
-    if (config_.verbose) {
-        std::cout << "\t[Verify] " << N_ << " frames"
-                  << " | max_sdf=" << max_sdf_all
-                  << " | min_sdf=" << min_sdf_all
-                  << " | violations=" << viol_count
-                  << " | max_\u0394=" << max_delta_deg << "\u00b0"
-                  << " | violated=" << (viol_count > 0 ? "YES" : "no") << std::endl;
-    }
+    std::cout << "\t[Verify] " << N_ << " frames"
+              << " | max_sdf=" << max_sdf_all
+              << " | min_sdf=" << min_sdf_all
+              << " | violations=" << viol_count
+              << " | max_\u0394=" << max_delta_deg << "\u00b0"
+              << " | violated=" << (viol_count > 0 ? "YES" : "no") << std::endl;
 }
 
 // -----------------------------------------------------------------------
@@ -557,12 +554,14 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
 {
     PROFILE_SCOPE("solveWindowGN");
 
+    // Window size, anchored prefix and free-frame DOF
     size_t N = window_indices_.size();
     if (N == 0) return {};
 
     size_t prefix = std::min(fixed_prefix_filtered.size(), N);
     int dof = static_cast<int>(N - prefix) * 3;
 
+    // Initial state: raw orientations, then overwrite anchored frames
     std::vector<Eigen::Quaterniond> q_state(N);
     for (size_t i = 0; i < N; ++i) {
         const Eigen::Quaterniond q_raw = (*all_frames_)[window_indices_[i]].orientation.normalized();
@@ -571,8 +570,10 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
     for (size_t i = 0; i < prefix; ++i)
         q_state[i] = fixed_prefix_filtered[i].normalized();
 
+    // Precompute the fixed crop boundary
     precomputeBoundary(prefix);
 
+    // SDF caches, multipliers, penalty weight; max_viol = initial violation
     g_cached_.assign(N, std::vector<double>(4, 0.0));
     J_cached_.assign(N, std::vector<Eigen::RowVector3d>(4));
 
@@ -584,14 +585,14 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
     for (int outer = 0; outer < config_.max_outer; ++outer) {
         double inv_f = 1.0 / focal_length_;
 
-        // Augmented objective at the point entering the inner loop; serves as the
-        // baseline so the first inner step already has a valid dPhi.
+        // Baseline augmented objective for the first inner step's dPhi
         double phi_prev = 0.0;
         if (config_.verbose)
             phi_prev = evaluateObjective(q_state, rho, inv_f, lambda);
 
         bool inner_stopped = false;
         for (int inner = 0; inner < config_.max_inner; ++inner) {
+            // Build GN normal equations H dx = -b, damped to stay positive definite
             Eigen::MatrixXd H = Eigen::MatrixXd::Zero(dof, dof);
             Eigen::VectorXd b = Eigen::VectorXd::Zero(dof);
 
@@ -600,6 +601,7 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
 
             for (int k = 0; k < dof; ++k) H(k, k) += 1e-6;
 
+            // Solve for dx; abort the inner loop on failure or non-finite result
             Eigen::LDLT<Eigen::MatrixXd> ldlt(H);
             if (ldlt.info() != Eigen::Success) {
                 if (config_.verbose)
@@ -616,9 +618,7 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
                 break;
             }
 
-            // Manifold update q <- exp(d) * q for each free frame, with a per-step
-            // trust region: clamp each rotation increment to 30 deg. This mutates
-            // q_state from q_k to q_{k+1}; b above stays built from q_k.
+            // Manifold update q_{k+1} = Exp(d) q_k, increments clamped to 30 deg
             const double max_angle = std::acos(-1.0) / 6.0;
             for (size_t i = prefix; i < N; ++i) {
                 int ii = static_cast<int>(i - prefix) * 3;
@@ -628,21 +628,13 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
                 q_state[i] = (expMap(d) * q_state[i]).normalized();
             }
 
-            // Refresh the SDF cache right after the state update, unconditionally,
-            // so the next build and the objective diagnostics below both see g/J
-            // at q_{k+1}. This keeps the constraint and smoothness terms on the
-            // same state (the penalty may be active via mu_eff even when max_viol<=0).
-            evaluateSDF(q_state);
-
+            // Refresh the SDF cache with q_{k+1} so the constraint and
+            // smoothness terms share one state; max_viol feeds the outer loop
+            max_viol = evaluateSDF(q_state);
             double dx_norm = dx.norm();
 
-            // Convergence indicators (diagnostics only, never used as stop criteria).
-            // Since b is not rebuilt after the update:
-            //   |JtR| = ||b||                  gradient at this step's START q_k
-            //   dPhi  = Phi(q_k) - Phi(q_{k+1})  this step's actual objective decrease
-            //   |d|   = ||dx||                 this step's length
-            // The end point q_{k+1}'s gradient appears as |JtR| on the next line;
-            // only the very last step's end gradient is never printed.
+            // Convergence diagnostics (output only): |JtR| = gradient at the
+            // step-start q_k; |d| and dPhi describe this step's result
             double grad_norm = b.norm();
             double phi_cur = 0.0, dphi = 0.0;
             if (config_.verbose) {
@@ -655,6 +647,7 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
                 std::cout << "\t[ALM=" << outer + 1 << " | GN=" << inner + 1 << "]"
                           << " |d|=" << dx_norm << " | dPhi=" << dphi << " | |JtR|=" << grad_norm;
 
+            // Inner loop converged once the step size drops below the threshold
             if (dx_norm < 1e-6) {
                 if (config_.verbose)
                     std::cout << " -> converged" << std::endl;
@@ -666,15 +659,15 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
 
             phi_prev = phi_cur;   // carry Phi(q_{k+1}) as the next step's baseline
         }
+        // Inner loop hit max_inner without converging (verbose only)
         if (!inner_stopped && config_.verbose)
             std::cout << "\t[ALM=" << outer + 1 << " | GN=" << config_.max_inner << "] -> reached max_inner=" << config_.max_inner << std::endl;
-
-        max_viol = evaluateSDF(q_state);
 
         // KKT errors on (x^{k+1}, lambda^{k+1}), used as the outer stop criteria.
         double e_feas = 0.0, e_stat = 0.0, e_comp = 0.0;
         computeKKTErrors(q_state, rho, inv_f, lambda, e_feas, e_stat, e_comp);
 
+        // Verbose: constraint status and KKT errors
         if (config_.verbose) {
             std::cout << "\t[ALM=" << outer + 1 << " | max_viol=" << max_viol << " | rho=" << rho << "]" << std::endl;
             std::cout << "\t[ALM=" << outer + 1 << " KKT] e_feas=" << e_feas
@@ -685,6 +678,7 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
         if (e_feas < config_.eps_feas && e_stat < config_.eps_stat && e_comp < config_.eps_comp)
             break;
 
+        // Multiplier update: lambda <- max(0, lambda + rho g)
         for (size_t i = prefix; i < N; ++i) {
             int act_i = static_cast<int>(i - prefix);
             for (int j = 0; j < 4; ++j) {
@@ -692,9 +686,12 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
             }
         }
 
+        // Penalty weight update: rho <- min(rho * gamma, rho_max)
         rho = std::min(rho * config_.gamma, config_.rho_max);
     }
 
-    verifyConstraints(q_state);
+    // Independent constraint verification before returning (verbose only)
+    if (config_.verbose)
+        verifyConstraints(q_state);
     return q_state;
 }
