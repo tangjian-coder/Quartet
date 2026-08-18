@@ -496,6 +496,10 @@ void Optimizer::verifyConstraints(const std::vector<Eigen::Quaterniond>& q_state
     double max_sdf_all = -1e10, min_sdf_all = 1e10;
     const auto& boundary = getBoundaryIndices();
 
+    // Violations must exceed a physical tolerance: ALM converges to g ~ 0 from
+    // the infeasible side, leaving sub-pixel noise between the two warp paths.
+    const double violation_tol = 0.01;   // pixels
+
     double max_delta_deg = 0.0;
     const double pi = std::acos(-1.0);
 
@@ -532,7 +536,7 @@ void Optimizer::verifyConstraints(const std::vector<Eigen::Quaterniond>& q_state
             if (s > max_sdf) max_sdf = s;
             if (s < frame_min_sdf) frame_min_sdf = s;
         }
-        if (max_sdf > 0) viol_count++;
+        if (max_sdf > violation_tol) viol_count++;
         if (max_sdf > max_sdf_all) max_sdf_all = max_sdf;
         if (frame_min_sdf < min_sdf_all) min_sdf_all = frame_min_sdf;
     }
