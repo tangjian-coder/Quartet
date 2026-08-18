@@ -171,7 +171,10 @@ double Optimizer::evaluateSDF(const std::vector<Eigen::Quaterniond>& q_state) {
                 Eigen::Vector2d C = fixed_boundary_[i][a] + tc * (fixed_boundary_[i][b_next] - fixed_boundary_[i][a]);
                 double d = (qp - C).norm();
                 if (d > 1e-8) {
-                    Eigen::Vector2d dg_dp = (qp - C) / d;
+                    // g = s is negative inside the polygon, so the gradient of g
+                    // w.r.t. the image point flips sign there.
+                    double sign = (s < 0.0) ? -1.0 : 1.0;
+                    Eigen::Vector2d dg_dp = sign * (qp - C) / d;
 
                     // Perspective projection Jacobian.
                     Eigen::Matrix<double, 2, 3> Jproj;
@@ -203,7 +206,7 @@ void Optimizer::buildSmoothnessHessian(const std::vector<Eigen::Quaterniond>& q_
     size_t N = N_;
     size_t prefix = prefix_;
 
-    // Per-frame caches: velocity residual, right-Jacobian inverse, adjoint rotation.
+    // Per-frame caches: velocity residual, right-Jacobian inverse, R_k^T.
     std::vector<Eigen::Vector3d> vel_r(N, Eigen::Vector3d::Zero());
     std::vector<Eigen::Matrix3d> JrInv(N, Eigen::Matrix3d::Identity());
     std::vector<Eigen::Matrix3d> Radj(N, Eigen::Matrix3d::Identity());
@@ -212,12 +215,14 @@ void Optimizer::buildSmoothnessHessian(const std::vector<Eigen::Quaterniond>& q_
         Eigen::Quaterniond V = (q_state[i - 1].inverse() * q_state[i]).normalized();
         vel_r[i] = logMap(V);
         JrInv[i] = rightJacobianInverseSO3(vel_r[i]);
-        Radj[i - 1] = q_state[i - 1].inverse().toRotationMatrix();
+        Radj[i] = q_state[i].inverse().toRotationMatrix();   // R_i^T
     }
 
-    // d(vel_r[k]) / d(delta-theta) under a left perturbation of q_state.
+    // d(vel_r[k]) / d(delta-theta_k) under a left perturbation of q_state.
+    // Under q_k <- Exp(delta) q_k this equals Jr^-1(r_k) * R_k^T (adjoint of the
+    // perturbed frame, not the previous one).
     auto Jvel = [&](size_t k) -> Eigen::Matrix3d {
-        return JrInv[k] * Radj[k - 1];
+        return JrInv[k] * Radj[k];
     };
 
     // Velocity: lambda1 * ||r_i||^2. r_i depends on q_i and q_{i-1} -> 2x2 = 4 blocks.
@@ -293,7 +298,8 @@ void Optimizer::buildSmoothnessHessian(const std::vector<Eigen::Quaterniond>& q_
         Eigen::Quaterniond dq = q_state[i].inverse() * target;
         dq.normalize();
         Eigen::Vector3d r_f = logMap(dq);
-        Eigen::Matrix3d J_f = -rightJacobianInverseSO3(r_f) * q_state[i].inverse().toRotationMatrix();
+        // Left perturbation of q_i gives d(r_f)/d(delta) = -Jr^-1(r_f) * R_target^T.
+        Eigen::Matrix3d J_f = -rightJacobianInverseSO3(r_f) * target.inverse().toRotationMatrix();
         accumulateGNSingle(config_.mu, r_f, J_f, static_cast<int>(i), static_cast<int>(prefix), H, b);
     }
 }
