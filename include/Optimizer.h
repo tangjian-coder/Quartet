@@ -66,6 +66,11 @@ private:
                                 Eigen::Ref<Eigen::MatrixXd> H,
                                 Eigen::Ref<Eigen::VectorXd> b);
     void verifyConstraints(const std::vector<Eigen::Quaterniond>& q_state);
+    // Three KKT errors at (x, lambda^{k+1}) used as the outer stop criteria.
+    void computeKKTErrors(const std::vector<Eigen::Quaterniond>& q_state,
+                          double rho, double inv_f,
+                          const std::vector<std::vector<double>>& lambda,
+                          double& e_feas, double& e_stat, double& e_comp);
 };
 
 #endif // OPTIMIZER_H

@@ -305,6 +305,126 @@ void Optimizer::buildSmoothnessHessian(const std::vector<Eigen::Quaterniond>& q_
 }
 
 // -----------------------------------------------------------------------
+// Compute the three KKT errors used as the outer stop criteria
+// -----------------------------------------------------------------------
+// e_feas: primal feasibility  ||[g]+||_inf
+// e_stat: stationarity        ||J_r^T r + J_g^T lambda^{k+1}||
+// e_comp: complementarity     ||lambda^{k+1} (.) g||_2
+// Requires g_cached_/J_cached_ to be refreshed for q_state (call evaluateSDF
+// first). The smoothness/fidelity part mirrors the b-accumulation of
+// buildSmoothnessHessian without building H; keep both in sync when the
+// residual terms change.
+void Optimizer::computeKKTErrors(const std::vector<Eigen::Quaterniond>& q_state,
+                                 double rho, double inv_f,
+                                 const std::vector<std::vector<double>>& lambda,
+                                 double& e_feas, double& e_stat, double& e_comp) {
+    size_t N = N_;
+    size_t prefix = prefix_;
+
+    // Per-frame caches (same as buildSmoothnessHessian).
+    std::vector<Eigen::Vector3d> vel_r(N, Eigen::Vector3d::Zero());
+    std::vector<Eigen::Matrix3d> JrInv(N, Eigen::Matrix3d::Identity());
+    std::vector<Eigen::Matrix3d> Radj(N, Eigen::Matrix3d::Identity());
+
+    for (size_t i = 1; i < N; ++i) {
+        Eigen::Quaterniond V = (q_state[i - 1].inverse() * q_state[i]).normalized();
+        vel_r[i] = logMap(V);
+        JrInv[i] = rightJacobianInverseSO3(vel_r[i]);
+        Radj[i] = q_state[i].inverse().toRotationMatrix();   // R_i^T
+    }
+
+    // d(vel_r[k]) / d(delta-theta_k) under a left perturbation of q_state.
+    auto Jvel = [&](size_t k) -> Eigen::Matrix3d {
+        return JrInv[k] * Radj[k];
+    };
+
+    // stat accumulates J_r^T r (smoothness + fidelity), then J_g^T lambda^{k+1}.
+    Eigen::VectorXd stat = Eigen::VectorXd::Zero((N - prefix) * 3);
+
+    // Velocity: lambda1 * ||r_i||^2.
+    for (size_t i = 1; i < N; ++i) {
+        Eigen::Matrix3d J = Jvel(i);
+        if (i >= prefix) {
+            int ii = static_cast<int>(i - prefix) * 3;
+            stat.segment<3>(ii) += config_.lambda1 * J.transpose() * vel_r[i];
+        }
+        if (i - 1 >= prefix) {
+            int im = static_cast<int>(i - 1 - prefix) * 3;
+            stat.segment<3>(im) -= config_.lambda1 * J.transpose() * vel_r[i];
+        }
+    }
+
+    // Acceleration: lambda2 * ||r_i - r_{i-1}||^2.
+    for (size_t i = 2; i < N; ++i) {
+        Eigen::Vector3d acc = vel_r[i] - vel_r[i - 1];
+        Eigen::Matrix3d Ji = Jvel(i), Ji1 = Jvel(i - 1);
+        // (frame index, d(acc)/d(that frame)); q_{i-1} appears in both r_i and r_{i-1}.
+        struct FJ { int fi; Eigen::Matrix3d J; };
+        FJ blocks[3] = {
+            {static_cast<int>(i), Ji},
+            {static_cast<int>(i - 1), -(Ji + Ji1)},
+            {static_cast<int>(i - 2), Ji1}
+        };
+        for (int a = 0; a < 3; ++a) {
+            if (blocks[a].fi < static_cast<int>(prefix)) continue;
+            int ia = (blocks[a].fi - static_cast<int>(prefix)) * 3;
+            stat.segment<3>(ia) += config_.lambda2 * blocks[a].J.transpose() * acc;
+        }
+    }
+
+    // Jerk: lambda3 * ||r_i - 2r_{i-1} + r_{i-2}||^2.
+    for (size_t i = 3; i < N; ++i) {
+        Eigen::Vector3d jerk = vel_r[i] - 2.0 * vel_r[i - 1] + vel_r[i - 2];
+        Eigen::Matrix3d Ji = Jvel(i), Ji1 = Jvel(i - 1), Ji2 = Jvel(i - 2);
+        struct FJ { int fi; Eigen::Matrix3d J; };
+        FJ blocks[4] = {
+            {static_cast<int>(i), Ji},
+            {static_cast<int>(i - 1), -Ji - 2.0 * Ji1},
+            {static_cast<int>(i - 2), 2.0 * Ji1 + Ji2},
+            {static_cast<int>(i - 3), -Ji2}
+        };
+        for (int a = 0; a < 4; ++a) {
+            if (blocks[a].fi < static_cast<int>(prefix)) continue;
+            int ia = (blocks[a].fi - static_cast<int>(prefix)) * 3;
+            stat.segment<3>(ia) += config_.lambda3 * blocks[a].J.transpose() * jerk;
+        }
+    }
+
+    // Fidelity: mu * ||Log(q_i^{-1} * q_target)||^2.
+    if (config_.mu > 0.0) {
+        for (size_t i = prefix; i < N; ++i) {
+            Eigen::Quaterniond target = (*all_frames_)[window_indices_[i]].orientation.normalized();
+            Eigen::Quaterniond dq = q_state[i].inverse() * target;
+            dq.normalize();
+            Eigen::Vector3d r_f = logMap(dq);
+            // Left perturbation of q_i gives d(r_f)/d(delta) = -Jr^-1(r_f) * R_target^T.
+            Eigen::Matrix3d J_f = -rightJacobianInverseSO3(r_f) * target.inverse().toRotationMatrix();
+            int ii = static_cast<int>(i - prefix) * 3;
+            stat.segment<3>(ii) += config_.mu * J_f.transpose() * r_f;
+        }
+    }
+
+    // Constraint part: J_g^T lambda^{k+1} + feasibility + complementarity.
+    e_feas = 0.0;
+    double e_comp2 = 0.0;
+    for (size_t i = prefix; i < N; ++i) {
+        int ii = static_cast<int>(i - prefix) * 3;
+        for (int j = 0; j < 4; ++j) {
+            double g = g_cached_[i][j] * inv_f;
+            double lam_new = std::max(0.0, lambda[i - prefix][j] + rho * g);   // lambda^{k+1}
+            Eigen::RowVector3d Jc = J_cached_[i][j] * inv_f;
+            stat.segment<3>(ii) += lam_new * Jc.transpose();                   // + J_g^T lambda
+            e_feas = std::max(e_feas, std::max(0.0, g));
+            double c = lam_new * g;
+            e_comp2 += c * c;
+        }
+    }
+
+    e_stat = stat.norm();
+    e_comp = std::sqrt(e_comp2);
+}
+
+// -----------------------------------------------------------------------
 // Build ALM constraint penalty
 // -----------------------------------------------------------------------
 
@@ -552,25 +672,8 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
         max_viol = evaluateSDF(q_state);
 
         // KKT errors on (x^{k+1}, lambda^{k+1}), used as the outer stop criteria.
-        // e_feas: feasibility ||[g]+||_inf; e_stat: ||J_r^T r + J_g^T lambda||; e_comp: ||lambda (.) g||.
-        Eigen::MatrixXd Hs = Eigen::MatrixXd::Zero(dof, dof);
-        Eigen::VectorXd stat = Eigen::VectorXd::Zero(dof);
-        buildSmoothnessHessian(q_state, Hs, stat);   // stat starts as J_r^T r (smoothness + fidelity)
-        double e_feas = 0.0, e_comp2 = 0.0;
-        for (size_t i = prefix; i < N; ++i) {
-            int ii = static_cast<int>(i - prefix) * 3;
-            for (int j = 0; j < 4; ++j) {
-                double g = g_cached_[i][j] * inv_f;
-                double lam_new = std::max(0.0, lambda[i - prefix][j] + rho * g);   // lambda^{k+1}
-                Eigen::RowVector3d Jc = J_cached_[i][j] * inv_f;
-                stat.segment<3>(ii) += lam_new * Jc.transpose();                   // + J_g^T lambda
-                e_feas = std::max(e_feas, std::max(0.0, g));
-                double c = lam_new * g;
-                e_comp2 += c * c;
-            }
-        }
-        double e_stat = stat.norm();
-        double e_comp = std::sqrt(e_comp2);
+        double e_feas = 0.0, e_stat = 0.0, e_comp = 0.0;
+        computeKKTErrors(q_state, rho, inv_f, lambda, e_feas, e_stat, e_comp);
 
         if (config_.verbose) {
             std::cout << "\t[ALM=" << outer + 1 << " | max_viol=" << max_viol << " | rho=" << rho << "]" << std::endl;
