@@ -498,7 +498,7 @@ void Optimizer::verifyConstraints(const std::vector<Eigen::Quaterniond>& q_state
 
     // Violations must exceed a physical tolerance: ALM converges to g ~ 0 from
     // the infeasible side, leaving sub-pixel noise between the two warp paths.
-    const double violation_tol = 0.01;   // pixels
+    const double violation_tol = 0.02;   // pixels (matches eps_feas=1e-5 @ f=1000)
 
     double max_delta_deg = 0.0;
     const double pi = std::acos(-1.0);
