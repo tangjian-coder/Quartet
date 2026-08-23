@@ -448,9 +448,10 @@ void Optimizer::buildConstraintPenalty(double rho, double inv_f,
     }
 }
 
-// -----------------------------------------------------------------------
-// Evaluate augmented objective Phi = 0.5||R||^2 (diagnostics only)
-// -----------------------------------------------------------------------
+// Evaluate the augmented objective Phi = 0.5||R||^2 (smoothness + fidelity +
+// constraint penalty). Used by the damped-GN acceptance test in the inner loop.
+// NOTE: the constraint penalty reads g_cached_; call evaluateSDF first so the
+// caches correspond to q_state.
 
 double Optimizer::evaluateObjective(const std::vector<Eigen::Quaterniond>& q_state,
                                     double rho, double inv_f,
@@ -498,7 +499,7 @@ void Optimizer::verifyConstraints(const std::vector<Eigen::Quaterniond>& q_state
 
     // Violations must exceed a physical tolerance: ALM converges to g ~ 0 from
     // the infeasible side, leaving sub-pixel noise between the two warp paths.
-    const double violation_tol = 0.02;   // pixels (matches eps_feas=1e-5 @ f=1000)
+    const double violation_tol = 2.0 * config_.violation_tol_px;   // px; forward-warp acceptance
 
     double max_delta_deg = 0.0;
     const double pi = std::acos(-1.0);
@@ -586,85 +587,127 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
     double rho = config_.rho_init;
     double max_viol = evaluateSDF(q_state);
 
+    // Best-so-far snapshot: ALM is not monotone in max_viol once rho grows
+    // into the ill-conditioned regime — late rounds can push a feasible state
+    // back out (observed in 2/95 windows). Return the best iterate, not the
+    // last one blindly. The initial state is NOT a candidate (its smoothness
+    // is unoptimized), so best_viol starts at +inf and round 1 always updates.
+    std::vector<Eigen::Quaterniond> q_best = q_state;
+    double best_viol = std::numeric_limits<double>::infinity();
+    double best_stat = std::numeric_limits<double>::infinity();
+
     for (int outer = 0; outer < config_.max_outer; ++outer) {
         double inv_f = 1.0 / focal_length_;
 
-        // Baseline augmented objective for the first inner step's dPhi
-        double phi_prev = 0.0;
-        if (config_.verbose)
-            phi_prev = evaluateObjective(q_state, rho, inv_f, lambda);
-
         bool inner_stopped = false;
-        for (int inner = 0; inner < config_.max_inner; ++inner) {
-            // Build GN normal equations H dx = -b, damped to stay positive definite
+        double mu_damp = 1e-6;          // GN damping, reset each outer round
+        int consec_rejects = 0;       // consecutive rejected trials (bail-out guard)
+        double viol_step_start = max_viol;   // violation at the start of each accepted step
+        int inner = 0;                // accepted steps only
+        while (inner < config_.max_inner && !inner_stopped) {
+            // UNDAMPED Gauss-Newton normal equations at the current point
             Eigen::MatrixXd H = Eigen::MatrixXd::Zero(dof, dof);
             Eigen::VectorXd b = Eigen::VectorXd::Zero(dof);
-
             buildSmoothnessHessian(q_state, H, b);
             buildConstraintPenalty(rho, inv_f, lambda, H, b);
 
-            for (int k = 0; k < dof; ++k) H(k, k) += 1e-6;
+            const double phi_cur = evaluateObjective(q_state, rho, inv_f, lambda);
+            const double grad_norm = b.norm();
+            double step_norm = 0.0, dphi = 0.0;
+            bool accepted = false;
 
-            // Solve for dx; abort the inner loop on failure or non-finite result
-            Eigen::LDLT<Eigen::MatrixXd> ldlt(H);
-            if (ldlt.info() != Eigen::Success) {
-                if (config_.verbose)
-                    std::cout << "\t[ALM=" << outer + 1 << " | GN=" << inner + 1 << "] stop: LDLT decomposition failed" << std::endl;
-                inner_stopped = true;
-                break;
+            // Damped GN, one control knob: the damping mu sets the step length
+            // and direction; the Armijo rule (true-objective decrease) decides
+            // acceptance. Rejected trials shrink the step by raising mu and are
+            // never used as the next linearization center (caches restored).
+            while (true) {
+                Eigen::MatrixXd Hd = H;
+                for (int k = 0; k < dof; ++k) Hd(k, k) += mu_damp;
+                Eigen::LDLT<Eigen::MatrixXd> ldlt(Hd);
+                if (ldlt.info() != Eigen::Success) {
+                    if (config_.verbose)
+                        std::cout << "\t[ALM=" << outer + 1 << " | GN=" << inner + 1 << "] stop: LDLT decomposition failed" << std::endl;
+                    inner_stopped = true;
+                    break;
+                }
+                Eigen::VectorXd dx = ldlt.solve(-b);
+                if (!dx.allFinite()) {
+                    if (config_.verbose)
+                        std::cout << "\t[ALM=" << outer + 1 << " | GN=" << inner + 1 << "] stop: non-finite dx (NaN/Inf)" << std::endl;
+                    inner_stopped = true;
+                    break;
+                }
+
+                // Clamp per-frame increments to 30 deg
+                const double max_angle = std::acos(-1.0) / 6.0;
+                for (size_t i = prefix; i < N; ++i) {
+                    int ii = static_cast<int>(i - prefix) * 3;
+                    Eigen::Vector3d d = dx.segment<3>(ii);
+                    double d_norm = d.norm();
+                    if (d_norm > max_angle) d *= max_angle / d_norm;
+                    dx.segment<3>(ii) = d;
+                }
+
+                // Trial point on the manifold and TRUE objective there
+                std::vector<Eigen::Quaterniond> q_trial = q_state;
+                for (size_t i = prefix; i < N; ++i) {
+                    int ii = static_cast<int>(i - prefix) * 3;
+                    q_trial[i] = (expMap(dx.segment<3>(ii)) * q_trial[i]).normalized();
+                }
+                const double viol_trial = evaluateSDF(q_trial);   // caches <- trial
+                const double phi_trial = evaluateObjective(q_trial, rho, inv_f, lambda);
+
+                // Armijo sufficient decrease: Phi_trial <= Phi_cur + c1*grad^T d
+                if (phi_trial <= phi_cur + 1e-4 * b.dot(dx)) {
+                    q_state = q_trial;
+                    max_viol = viol_trial;
+                    step_norm = dx.norm();
+                    dphi = phi_cur - phi_trial;
+                    mu_damp = std::max(mu_damp / 3.0, 1e-9);   // step accepted: more aggressive
+                    accepted = true;
+                    break;
+                }
+                evaluateSDF(q_state);   // reject: restore caches to the current state
+                mu_damp *= 3.0;                               // shrink the step, retry
+                if (++consec_rejects > 40 || mu_damp > 1e12) {
+                    if (config_.verbose)
+                        std::cout << "\t[ALM=" << outer + 1 << " | GN=" << inner + 1
+                                  << "] stop: damped GN stuck (mu=" << mu_damp << ", |JtR|=" << grad_norm << ")" << std::endl;
+                    inner_stopped = true;
+                    break;
+                }
             }
+            if (!accepted) break;   // inner_stopped already true
 
-            Eigen::VectorXd dx = ldlt.solve(-b);
-            if (!dx.allFinite()) {
-                if (config_.verbose)
-                    std::cout << "\t[ALM=" << outer + 1 << " | GN=" << inner + 1 << "] stop: non-finite dx (NaN/Inf)" << std::endl;
-                inner_stopped = true;
-                break;
-            }
+            ++inner;
+            consec_rejects = 0;
 
-            // Manifold update q_{k+1} = Exp(d) q_k, increments clamped to 30 deg
-            const double max_angle = std::acos(-1.0) / 6.0;
-            for (size_t i = prefix; i < N; ++i) {
-                int ii = static_cast<int>(i - prefix) * 3;
-                Eigen::Vector3d d = dx.segment<3>(ii);
-                double d_norm = d.norm();
-                if (d_norm > max_angle) d *= max_angle / d_norm;
-                q_state[i] = (expMap(d) * q_state[i]).normalized();
-            }
-
-            // Refresh the SDF cache with q_{k+1} so the constraint and
-            // smoothness terms share one state; max_viol feeds the outer loop
-            max_viol = evaluateSDF(q_state);
-            double dx_norm = dx.norm();
-
-            // Convergence diagnostics (output only): |JtR| = gradient at the
-            // step-start q_k; |d| and dPhi describe this step's result
-            double grad_norm = b.norm();
-            double phi_cur = 0.0, dphi = 0.0;
+            // Convergence diagnostics: |JtR| = gradient at the step-start point;
+            // |d| and dPhi describe the accepted step; mu = LM damping used.
             if (config_.verbose) {
-                phi_cur = evaluateObjective(q_state, rho, inv_f, lambda);
-                dphi = phi_prev - phi_cur;
+                std::cout << "\t[ALM=" << outer + 1 << " | GN=" << inner << "]"
+                          << " |d|=" << step_norm << " | dPhi=" << dphi << " | |JtR|=" << grad_norm;
+                if (mu_damp > 1e-6)
+                    std::cout << " | mu=" << mu_damp;
             }
 
-            // Print the three convergence indicators every inner iteration (|d|, dPhi, |JtR|).
-            if (config_.verbose)
-                std::cout << "\t[ALM=" << outer + 1 << " | GN=" << inner + 1 << "]"
-                          << " |d|=" << dx_norm << " | dPhi=" << dphi << " | |JtR|=" << grad_norm;
-
-            // Inner loop converged once the step size drops below the threshold
-            if (dx_norm < 1e-6) {
+            // Objective-progress stop: with damping, mu can stay large so the
+            // step norm never reaches 1e-6; catch the creeping steps here.
+            // A creeping step is one where NEITHER the objective NOR the
+            // violation moves: at high rho a tiny dPhi can still come with
+            // meaningful violation progress, which must not be cut off.
+            if (dphi < 1e-7 && viol_step_start - max_viol < 1e-4) {
                 if (config_.verbose)
-                    std::cout << " -> converged" << std::endl;
+                    std::cout << " -> stop: dPhi" << std::endl;
                 inner_stopped = true;
                 break;
             }
+            viol_step_start = max_viol;
             if (config_.verbose)
                 std::cout << std::endl;
-
-            phi_prev = phi_cur;   // carry Phi(q_{k+1}) as the next step's baseline
         }
         // Inner loop hit max_inner without converging (verbose only)
-        if (!inner_stopped && config_.verbose)
+        if (!inner_stopped && inner >= config_.max_inner && config_.verbose)
             std::cout << "\t[ALM=" << outer + 1 << " | GN=" << config_.max_inner << "] -> reached max_inner=" << config_.max_inner << std::endl;
 
         // KKT errors on (x^{k+1}, lambda^{k+1}), used as the outer stop criteria.
@@ -678,9 +721,26 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
                       << " | e_stat=" << e_stat << " | e_comp=" << e_comp << std::endl;
         }
 
-        // Stop when all three KKT errors are within tolerance.
-        if (e_feas < config_.eps_feas && e_stat < config_.eps_stat && e_comp < config_.eps_comp)
+        // Track the best iterate: smallest positive violation, then stationarity.
+        {
+            double viol_pos = std::max(0.0, max_viol);
+            if (viol_pos < best_viol - 1e-12 ||
+                (viol_pos == best_viol && e_stat < best_stat)) {
+                best_viol = viol_pos;
+                best_stat = e_stat;
+                q_best = q_state;
+            }
+        }
+
+        // Relaxed stop: feasibility + complementarity met and the state is
+        // already feasible (max_viol <= violation_tol_px). e_stat is an ABSOLUTE
+        // tolerance and becomes unattainable at large rho (the J_g^T*lambda term
+        // scales with rho), so it must not single-handedly keep the loop running.
+        if (e_feas < config_.eps_feas && e_comp < config_.eps_comp && max_viol <= config_.violation_tol_px) {
+            if (config_.verbose)
+                std::cout << "\t[ALM=" << outer + 1 << "] early stop: feasible & complementary (e_stat=" << e_stat << ")" << std::endl;
             break;
+        }
 
         // Multiplier update: lambda <- max(0, lambda + rho g)
         for (size_t i = prefix; i < N; ++i) {
@@ -690,8 +750,17 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
             }
         }
 
-        // Penalty weight update: rho <- min(rho * gamma, rho_max)
+        // Penalty weight update (tutorial step 4).
         rho = std::min(rho * config_.gamma, config_.rho_max);
+    }
+
+
+    // Return the best iterate found, not necessarily the last one.
+    if (best_viol < std::max(0.0, max_viol)) {
+        if (config_.verbose)
+            std::cout << "\t[ALM] returning best-so-far: max_viol " << max_viol << " -> " << best_viol << std::endl;
+        q_state = q_best;
+        max_viol = evaluateSDF(q_state);   // refresh caches for the returned state
     }
 
     // Independent constraint verification before returning (verbose only)

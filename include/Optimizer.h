@@ -16,9 +16,15 @@ struct SolverConfig {
     double gamma = 2.0;
     int max_outer = 5;
     int max_inner = 8;
-    double eps_feas = 1e-5;   // Outer KKT: feasibility  ||[g]+||  (0.01 px @ f=1000)
-    double eps_stat = 1e-3;   // Outer KKT: stationarity ||J_r^T r + J_g^T lambda||
+    double eps_feas = 4e-5;   // Outer: feasibility ||[g]+|| (rad) ≈ violation_tol_px / f
+    double eps_stat = 1e-3;   // Outer KKT: stationarity (diagnostic only; not used for stopping)
     double eps_comp = 1e-5;   // Outer KKT: complementarity ||lambda (.) g||
+    // Physical violation tolerance (px). The outer loop stops below this
+    // (inverse-warp metric); verifyConstraints accepts up to 2x (forward-warp).
+    double violation_tol_px = 0.05;
+    // Inner loop: damped GN with Armijo acceptance — rejected steps raise mu
+    // and retry without consuming an iteration. Plain full-step GN was observed
+    // to enter limit cycles (dPhi<0 steps) on this nonconvex objective.
     bool verbose = false;   // Print per-window solver diagnostics.
 };
 
@@ -54,7 +60,8 @@ private:
 
     void precomputeBoundary(size_t prefix);
     double evaluateSDF(const std::vector<Eigen::Quaterniond>& q_state);
-    // Augmented objective Phi = 0.5||R||^2 (smoothness + fidelity + constraint penalty), for diagnostics.
+    // Augmented objective Phi = 0.5||R||^2 (smoothness + fidelity + constraint
+    // penalty); used by the damped-GN acceptance test. Requires g_cached_ fresh.
     double evaluateObjective(const std::vector<Eigen::Quaterniond>& q_state,
                              double rho, double inv_f,
                              const std::vector<std::vector<double>>& lambda);
