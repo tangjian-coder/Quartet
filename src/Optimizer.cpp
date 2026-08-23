@@ -587,11 +587,9 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
     double rho = config_.rho_init;
     double max_viol = evaluateSDF(q_state);
 
-    // Best-so-far snapshot: ALM is not monotone in max_viol once rho grows
-    // into the ill-conditioned regime — late rounds can push a feasible state
-    // back out (observed in 2/95 windows). Return the best iterate, not the
-    // last one blindly. The initial state is NOT a candidate (its smoothness
-    // is unoptimized), so best_viol starts at +inf and round 1 always updates.
+    // Best-so-far snapshot: ALM is not monotone at high rho — late rounds can
+    // push a feasible state back out. best_viol starts at +inf so round 1
+    // always updates (the raw initial state is never a candidate).
     std::vector<Eigen::Quaterniond> q_best = q_state;
     double best_viol = std::numeric_limits<double>::infinity();
     double best_stat = std::numeric_limits<double>::infinity();
@@ -616,10 +614,8 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
             double step_norm = 0.0, dphi = 0.0;
             bool accepted = false;
 
-            // Damped GN, one control knob: the damping mu sets the step length
-            // and direction; the Armijo rule (true-objective decrease) decides
-            // acceptance. Rejected trials shrink the step by raising mu and are
-            // never used as the next linearization center (caches restored).
+            // Damped GN with Armijo acceptance on the TRUE objective; rejected
+            // trials raise mu and retry (caches restored, iteration not consumed).
             while (true) {
                 Eigen::MatrixXd Hd = H;
                 for (int k = 0; k < dof; ++k) Hd(k, k) += mu_damp;
@@ -691,12 +687,10 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
                     std::cout << " | mu=" << mu_damp;
             }
 
-            // Objective-progress stop: with damping, mu can stay large so the
-            // step norm never reaches 1e-6; catch the creeping steps here.
-            // A creeping step is one where NEITHER the objective NOR the
-            // violation moves: at high rho a tiny dPhi can still come with
-            // meaningful violation progress, which must not be cut off.
-            if (dphi < 1e-7 && viol_step_start - max_viol < 1e-4) {
+            // Creeping-step stop: at high rho the step norm never reaches 1e-6,
+            // so stop when NEITHER the objective NOR the violation still moves
+            // (a tiny dPhi with viol progress must not be cut off).
+            if (dphi < 1e-6 && viol_step_start - max_viol < 1e-3) {
                 if (config_.verbose)
                     std::cout << " -> stop: dPhi" << std::endl;
                 inner_stopped = true;
@@ -732,10 +726,8 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
             }
         }
 
-        // Relaxed stop: feasibility + complementarity met and the state is
-        // already feasible (max_viol <= violation_tol_px). e_stat is an ABSOLUTE
-        // tolerance and becomes unattainable at large rho (the J_g^T*lambda term
-        // scales with rho), so it must not single-handedly keep the loop running.
+        // Stop when feasibility + complementarity are met and viol is within
+        // tolerance. e_stat is unattainable at large rho, so it is diagnostic only.
         if (e_feas < config_.eps_feas && e_comp < config_.eps_comp && max_viol <= config_.violation_tol_px) {
             if (config_.verbose)
                 std::cout << "\t[ALM=" << outer + 1 << "] early stop: feasible & complementary (e_stat=" << e_stat << ")" << std::endl;
