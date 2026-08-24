@@ -43,6 +43,7 @@ double signedDistanceFromPointToPolygon(const Eigen::Vector2d& point, const std:
     double min_dist = std::numeric_limits<double>::max();
     int best_idx = -1;
     double best_t_raw = 0.0;
+    int winding_number = 0;   // inside test fused into the same edge pass
     for (size_t i = 0; i < polygon.size(); ++i) {
         Eigen::Vector2d p1 = polygon[i];
         Eigen::Vector2d p2 = polygon[(i + 1) % polygon.size()];
@@ -57,16 +58,21 @@ double signedDistanceFromPointToPolygon(const Eigen::Vector2d& point, const std:
             best_idx = static_cast<int>(i);
             best_t_raw = t_raw;
         }
+        if (p1.y() <= point.y()) {
+            if (p2.y() > point.y() && (p2.x() - p1.x()) * (point.y() - p1.y()) - (p2.y() - p1.y()) * (point.x() - p1.x()) > 0) {
+                winding_number++;
+            }
+        } else {
+            if (p2.y() <= point.y() && (p2.x() - p1.x()) * (point.y() - p1.y()) - (p2.y() - p1.y()) * (point.x() - p1.x()) < 0) {
+                winding_number--;
+            }
+        }
     }
 
     if (closest_edge_idx) *closest_edge_idx = best_idx;
     if (t_param) *t_param = best_t_raw;
 
-    if (isPointInsidePolygon(point, polygon)) {
-        return -min_dist;
-    } else {
-        return min_dist;
-    }
+    return (winding_number != 0) ? -min_dist : min_dist;
 }
 
 }
