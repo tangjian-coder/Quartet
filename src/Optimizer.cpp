@@ -629,8 +629,8 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
     // push a feasible state back out. best_viol starts at +inf so round 1
     // always updates (the raw initial state is never a candidate).
     std::vector<Eigen::Quaterniond> q_best = q_state;
-    double best_viol = std::numeric_limits<double>::infinity();
-    double best_stat = std::numeric_limits<double>::infinity();
+    double best_viol = 1e10;
+    double best_stat = 1e10;
 
     for (int outer = 0; outer < config_.max_outer; ++outer) {
         double inv_f = 1.0 / focal_length_;
