@@ -188,6 +188,8 @@ def main():
     ap.add_argument('--out', default=case + '/out', help='output directory')
     ap.add_argument('--draw-grid', action='store_false',
                     help='overlay the center crop rect (black-border check)')
+    ap.add_argument('--no-frame-number', action='store_true',
+                    help='do not overlay the frame number (top-left)')
     ap.add_argument('--max-frames', type=int, default=0, help='limit frames (debug)')
     args = ap.parse_args()
 
@@ -239,6 +241,13 @@ def main():
         if args.draw_grid:
             draw_crop_frame(warped_frame, conf['gridFrmCropFctrH'],
                             conf['gridFrmCropFctrV'], frame_w, frame_h)
+        # Frame number overlay, top-left, 0-based (black outline + white text).
+        if not args.no_frame_number:
+            label = str(i)
+            cv2.putText(warped_frame, label, (12, 34), cv2.FONT_HERSHEY_SIMPLEX,
+                        1.2, (0, 0, 0), 5, cv2.LINE_AA)
+            cv2.putText(warped_frame, label, (12, 34), cv2.FONT_HERSHEY_SIMPLEX,
+                        1.2, (255, 255, 255), 2, cv2.LINE_AA)
         writer.write(warped_frame)
 
         # Progress bar: [####------]  42% 700/1661 | 12.3s | ETA 17.1s

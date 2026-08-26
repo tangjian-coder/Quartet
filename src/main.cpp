@@ -18,7 +18,12 @@ struct SlidingWindowConfig {
 
 void printUsage(const char* exe_name) {
     std::cout << "Usage: " << exe_name
-              << " [--anchor-frames N] [--output-frames N] [--future-frames N] [--verbose]" << std::endl;
+              << " [--anchor-frames N] [--output-frames N] [--future-frames N] [--verbose]"
+              << std::endl;
+    std::cout << "  --quat <path>    raw quaternion csv (default ../data/DbgFile_Frame_OriginalCamOrient.csv)" << std::endl;
+    std::cout << "  --yaml <path>    config yaml      (default ../data/conf.yaml)" << std::endl;
+    std::cout << "  --rcs <path>     RCS grid csv     (default ../data/DbgFile_WarpGrids_RSCFRMMid.csv)" << std::endl;
+    std::cout << "  --output <path>  optimized quat csv (default ../data/optimized_quaternions.csv)" << std::endl;
 }
 
 bool parseSizeT(const std::string& value, size_t& out) {
@@ -59,6 +64,8 @@ int main(int argc, char** argv) {
     const std::string yaml_path = "../data/conf.yaml";
     const std::string rcs_path = "../data/DbgFile_WarpGrids_RSCFRMMid.csv";
     const std::string output_path = "../data/optimized_quaternions.csv";
+    std::string quat_path_opt = quat_path, yaml_path_opt = yaml_path;
+    std::string rcs_path_opt = rcs_path, output_path_opt = output_path;
 
     SlidingWindowConfig window_cfg;
     bool verbose = false;
@@ -68,6 +75,27 @@ int main(int argc, char** argv) {
         if (arg == "--help" || arg == "-h") {
             printUsage(argv[0]);
             return 0;
+        }
+        // Path overrides (defaults keep ../data/... for backward compat).
+        if (arg == "--quat") {
+            if (arg_idx + 1 >= argc) { std::cerr << "Missing value for --quat" << std::endl; return 1; }
+            quat_path_opt = argv[++arg_idx];
+            continue;
+        }
+        if (arg == "--yaml") {
+            if (arg_idx + 1 >= argc) { std::cerr << "Missing value for --yaml" << std::endl; return 1; }
+            yaml_path_opt = argv[++arg_idx];
+            continue;
+        }
+        if (arg == "--rcs") {
+            if (arg_idx + 1 >= argc) { std::cerr << "Missing value for --rcs" << std::endl; return 1; }
+            rcs_path_opt = argv[++arg_idx];
+            continue;
+        }
+        if (arg == "--output") {
+            if (arg_idx + 1 >= argc) { std::cerr << "Missing value for --output" << std::endl; return 1; }
+            output_path_opt = argv[++arg_idx];
+            continue;
         }
         if (arg == "--future-frames") {
             if (!readOptionValue(argc, argv, arg_idx, arg, window_cfg.future_frames)) {
@@ -112,14 +140,14 @@ int main(int argc, char** argv) {
     std::cout << "  total input frames per window: " << total_window_frames << std::endl;
 
     // Check input files exist before loading.
-    for (const std::string& path : {quat_path, yaml_path, rcs_path}) {
+    for (const std::string& path : {quat_path_opt, yaml_path_opt, rcs_path_opt}) {
         if (!std::ifstream(path).good()) {
             std::cerr << "File not found: " << path << std::endl;
             return 1;
         }
     }
 
-    DataLoader loader(quat_path, yaml_path, rcs_path);
+    DataLoader loader(quat_path_opt, yaml_path_opt, rcs_path_opt);
     if (!loader.load()) {
         std::cerr << "Failed to load input data." << std::endl;
         return 1;
@@ -207,11 +235,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (!FileUtils::saveQuaternions(output_path, optimized_quaternions)) {
-        std::cerr << "Failed to save output: " << output_path << std::endl;
+    if (!FileUtils::saveQuaternions(output_path_opt, optimized_quaternions)) {
+        std::cerr << "Failed to save output: " << output_path_opt << std::endl;
         return 1;
     }
 
-    std::cout << "Saved optimized quaternions: " << output_path << std::endl;
+    std::cout << "Saved optimized quaternions: " << output_path_opt << std::endl;
     return 0;
 }
