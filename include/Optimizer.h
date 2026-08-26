@@ -3,6 +3,7 @@
 #define OPTIMIZER_H
 
 #include <vector>
+#include <array>
 #include <Eigen/Dense>
 #include "FrameData.h"
 
@@ -54,6 +55,10 @@ private:
     size_t N_ = 0;
     std::vector<std::vector<Eigen::Vector2d>> fixed_boundary_;
     Eigen::Vector3d corner_rays_[4];
+    // Per-frame coarse boundary: 4 coarse edges with inward safe offset
+    // (bulge + margin). A corner inside all of them is constraint-inactive.
+    struct CoarseEdge { Eigen::Vector2d p0, n_in; double offset; };
+    std::vector<std::array<CoarseEdge, 4>> coarse_edges_;
     double focal_length_ = 0.0;
     std::vector<std::vector<double>> g_cached_;
     std::vector<std::vector<Eigen::RowVector3d>> J_cached_;

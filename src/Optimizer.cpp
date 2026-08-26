@@ -120,6 +120,27 @@ void Optimizer::precomputeBoundary(size_t prefix) {
         }
     }
 
+    // Coarse boundary per frame: 4 coarse edges (fine-edge endpoint lines).
+    // Safe depth of corner x = min_e n_e·(x - p0_e) - bulge_e - margin.
+    static constexpr double kSafeMargin = 50.0;   // px
+    coarse_edges_.resize(N_);
+    for (size_t i = 0; i < N_; ++i) {
+        const auto& bnd = fixed_boundary_[i];   // 40 pts, 4 fine edges of 10 segs
+        for (int e = 0; e < 4; ++e) {
+            const Eigen::Vector2d& p0 = bnd[e * 10];
+            const Eigen::Vector2d& p1 = bnd[(e + 1) * 10 % 40];
+            Eigen::Vector2d dir = p1 - p0;
+            // Boundary is clockwise, so the right normal points inward.
+            Eigen::Vector2d n_in(dir.y(), -dir.x());
+            n_in.normalize();
+            // Only inward bulge needs covering (it shrinks the polygon).
+            double bulge = 0.0;
+            for (int k = e * 10 + 1; k < (e + 1) * 10; ++k)
+                bulge = std::max(bulge, n_in.dot(bnd[k] - p0));   // +n_in = inward
+            coarse_edges_[i][e] = {p0, n_in, bulge + kSafeMargin};
+        }
+    }
+
     double half_w = (width - 1) / 2.0;
     double half_h = (height - 1) / 2.0;
     double lx = -half_w * (1.0 - crop_factor_h);
@@ -155,6 +176,23 @@ double Optimizer::evaluateSDF(const std::vector<Eigen::Quaterniond>& q_state) {
 
             // Project to image coordinates.
             Eigen::Vector2d qp(focal_length_ * y.x() / zz, focal_length_ * y.y() / zz);
+
+            // Coarse test against 4 coarse edges: a corner deeper than margin
+            // inside all of them is constraint-inactive (penalty and gradient
+            // both zero), so the fine 40-edge pass can be skipped.
+            double d = 1e10;
+            for (int e = 0; e < 4; ++e) {
+                const auto& ce = coarse_edges_[i][e];
+                d = std::min(d, ce.n_in.dot(qp - ce.p0) - ce.offset);
+            }
+            // lambda/rho peaks at ~half the first-round overshoot (~17px on
+            // this data), far below the 50px margin: penalty provably inactive.
+            if (d > 0.0) {
+                g_cached_[i][j] = -d;   // conservative bound (true viol <= -d)
+                J_cached_[i][j].setZero();
+                max_viol = std::max(max_viol, -d);
+                continue;
+            }
 
             int ci = -1;       // Closest edge.
             double tr = 0.0;   // Unclamped edge parameter.
@@ -690,7 +728,7 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
             // Creeping-step stop: at high rho the step norm never reaches 1e-6,
             // so stop when NEITHER the objective NOR the violation still moves
             // (a tiny dPhi with viol progress must not be cut off).
-            if (dphi < 1e-6 && viol_step_start - max_viol < 1e-3) {
+            if (dphi < 1e-6 && std::max(0.0, viol_step_start) - std::max(0.0, max_viol) < 1e-3) {
                 if (config_.verbose)
                     std::cout << " -> stop: dPhi" << std::endl;
                 inner_stopped = true;
