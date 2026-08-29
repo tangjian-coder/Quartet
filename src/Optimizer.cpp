@@ -130,8 +130,8 @@ void Optimizer::precomputeBoundary(size_t prefix) {
             const Eigen::Vector2d& p0 = bnd[e * 10];
             const Eigen::Vector2d& p1 = bnd[(e + 1) * 10 % 40];
             Eigen::Vector2d dir = p1 - p0;
-            // Boundary is clockwise, so the right normal points inward.
-            Eigen::Vector2d n_in(dir.y(), -dir.x());
+            // Pixel coords are y-down; for this winding the left normal points inward.
+            Eigen::Vector2d n_in(-dir.y(), dir.x());
             n_in.normalize();
             // Only inward bulge needs covering (it shrinks the polygon).
             double bulge = 0.0;
