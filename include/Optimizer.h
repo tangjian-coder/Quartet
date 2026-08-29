@@ -64,7 +64,8 @@ private:
     std::vector<std::vector<Eigen::RowVector3d>> J_cached_;
 
     void precomputeBoundary(size_t prefix);
-    double evaluateSDF(const std::vector<Eigen::Quaterniond>& q_state);
+    double evaluateSDF(const std::vector<Eigen::Quaterniond>& q_state,
+                       const std::vector<std::vector<double>>& lambda, double rho);
     // Augmented objective Phi = 0.5||R||^2 (smoothness + fidelity + constraint
     // penalty); used by the damped-GN acceptance test. Requires g_cached_ fresh.
     double evaluateObjective(const std::vector<Eigen::Quaterniond>& q_state,

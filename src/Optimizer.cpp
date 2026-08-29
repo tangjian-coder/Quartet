@@ -158,7 +158,8 @@ void Optimizer::precomputeBoundary(size_t prefix) {
 // -----------------------------------------------------------------------
 
 // Evaluate SDF constraints and cache values/Jacobians.
-double Optimizer::evaluateSDF(const std::vector<Eigen::Quaterniond>& q_state) {
+double Optimizer::evaluateSDF(const std::vector<Eigen::Quaterniond>& q_state,
+                              const std::vector<std::vector<double>>& lambda, double rho) {
     double max_viol = -1e10;
     // Skip fixed anchor frames.
     for (size_t i = prefix_; i < N_; ++i) {
@@ -185,9 +186,9 @@ double Optimizer::evaluateSDF(const std::vector<Eigen::Quaterniond>& q_state) {
                 const auto& ce = coarse_edges_[i][e];
                 d = std::min(d, ce.n_in.dot(qp - ce.p0) - ce.offset);
             }
-            // lambda/rho peaks at ~half the first-round overshoot (~17px on
-            // this data), far below the 50px margin: penalty provably inactive.
-            if (d > 0.0) {
+            // Release depth must exceed lambda*f/rho (pixel pressure): the
+            // penalty and lambda update both clamp to zero, so -d stays exact.
+            if (d > lambda[i - prefix_][j] * focal_length_ / rho) {
                 g_cached_[i][j] = -d;   // conservative bound (true viol <= -d)
                 J_cached_[i][j].setZero();
                 max_viol = std::max(max_viol, -d);
@@ -623,7 +624,7 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
     std::vector<std::vector<double>> lambda(N - prefix, std::vector<double>(4, 0.0));
 
     double rho = config_.rho_init;
-    double max_viol = evaluateSDF(q_state);
+    double max_viol = evaluateSDF(q_state, lambda, rho);
 
     // Best-so-far snapshot: ALM is not monotone at high rho — late rounds can
     // push a feasible state back out. best_viol starts at +inf so round 1
@@ -688,7 +689,7 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
                     int ii = static_cast<int>(i - prefix) * 3;
                     q_trial[i] = (expMap(dx.segment<3>(ii)) * q_trial[i]).normalized();
                 }
-                const double viol_trial = evaluateSDF(q_trial);   // caches <- trial
+                const double viol_trial = evaluateSDF(q_trial, lambda, rho);   // caches <- trial
                 const double phi_trial = evaluateObjective(q_trial, rho, inv_f, lambda);
 
                 // Armijo sufficient decrease: Phi_trial <= Phi_cur + c1*grad^T d
@@ -701,7 +702,7 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
                     accepted = true;
                     break;
                 }
-                evaluateSDF(q_state);   // reject: restore caches to the current state
+                evaluateSDF(q_state, lambda, rho);   // reject: restore caches to the current state
                 mu_damp *= 3.0;                               // shrink the step, retry
                 if (++consec_rejects > 40 || mu_damp > 1e12) {
                     if (config_.verbose)
@@ -790,7 +791,7 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
         if (config_.verbose)
             std::cout << "\t[ALM] returning best-so-far: max_viol " << max_viol << " -> " << best_viol << std::endl;
         q_state = q_best;
-        max_viol = evaluateSDF(q_state);   // refresh caches for the returned state
+        max_viol = evaluateSDF(q_state, lambda, rho);   // refresh caches for the returned state
     }
 
     // Independent constraint verification before returning (verbose only)
