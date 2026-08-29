@@ -52,7 +52,9 @@ Per window:
 
 ## Tuning Parameters
 
-All solver knobs live in `SolverConfig` (include/Optimizer.h).
+Solver knobs are split by role:
+- **Algorithm/policy knobs** (changing them alters the solution quality/trade-off): `SolverConfig` in `include/Optimizer.h`
+- **Numerical/implementation constants** (solver-internal, affect only robustness/efficiency): `constexpr` in `src/Optimizer.cpp`
 
 | Parameter | Default | Effect |
 |---|---|---|
