@@ -5,14 +5,31 @@
 #include <cmath>
 #include <iostream>
 
-// Boundary indices for 11x11 RCS grid (40 outer points vs 121 total)
+constexpr int kGridSide = 11;        // RCS grid is kGridSide x kGridSide
+constexpr int kEdgeSegs = kGridSide - 1;
+constexpr double kBigNum = 1e10;     // +inf stand-in for max/min trackers
+constexpr double kPi = 3.14159265358979323846;
+
+// Damped-GN / Armijo tuning knobs (solver-internal, not user-facing)
+constexpr double kArmijoC1 = 1e-4;         // sufficient-decrease coefficient
+constexpr double kDampInit = 1e-6;         // damping reset value per outer round
+constexpr double kDampFactor = 3.0;        // shrink on reject, grow on accept
+constexpr double kDampMin = 1e-9;
+constexpr double kDampMax = 1e12;          // bail-out when damping explodes
+constexpr int kMaxConsecRejects = 40;      // bail-out on repeated rejects
+constexpr double kMaxStepAngle = kPi / 6.0;   // clamp per-frame increment to 30 deg
+constexpr double kDPhiTol = 1e-6;          // inner stop: objective stalled
+constexpr double kViolDropTol = 1e-3;      // inner stop: violation must also stall
+constexpr double kVerifyTolFactor = 2.0;   // forward-warp check is looser (different path)
+
+// Boundary indices for kGridSide x kGridSide RCS grid (4*kEdgeSegs outer points)
 static const std::vector<size_t>& getBoundaryIndices() {
     static const std::vector<size_t> idx = []() {
         std::vector<size_t> v;
-        for (int j = 0; j < 11; ++j) v.push_back(j);
-        for (int i = 1; i <= 10; ++i) v.push_back(i * 11 + 10);
-        for (int j = 9; j >= 0; --j) v.push_back(10 * 11 + j);
-        for (int i = 9; i > 0; --i) v.push_back(i * 11);
+        for (int j = 0; j < kGridSide; ++j) v.push_back(j);
+        for (int i = 1; i <= kEdgeSegs; ++i) v.push_back(i * kGridSide + kEdgeSegs);
+        for (int j = kEdgeSegs - 1; j >= 0; --j) v.push_back(kEdgeSegs * kGridSide + j);
+        for (int i = kEdgeSegs - 1; i > 0; --i) v.push_back(i * kGridSide);
         return v;
     }();
     return idx;
@@ -125,15 +142,15 @@ void Optimizer::precomputeBoundary(size_t prefix) {
     for (size_t i = 0; i < N_; ++i) {
         const auto& bnd = fixed_boundary_[i];   // 40 pts, 4 fine edges of 10 segs
         for (int e = 0; e < 4; ++e) {
-            const Eigen::Vector2d& p0 = bnd[e * 10];
-            const Eigen::Vector2d& p1 = bnd[(e + 1) * 10 % 40];
+            const Eigen::Vector2d& p0 = bnd[e * kEdgeSegs];
+            const Eigen::Vector2d& p1 = bnd[(e + 1) * kEdgeSegs % (4 * kEdgeSegs)];
             Eigen::Vector2d dir = p1 - p0;
             // Pixel coords are y-down; for this winding the left normal points inward.
             Eigen::Vector2d n_in(-dir.y(), dir.x());
             n_in.normalize();
             // Only inward bulge needs covering (it shrinks the polygon).
             double bulge = 0.0;
-            for (int k = e * 10 + 1; k < (e + 1) * 10; ++k)
+            for (int k = e * kEdgeSegs + 1; k < (e + 1) * kEdgeSegs; ++k)
                 bulge = std::max(bulge, n_in.dot(bnd[k] - p0));   // +n_in = inward
             coarse_edges_[i][e] = {p0, n_in, bulge + kSafeMargin};
         }
@@ -158,7 +175,7 @@ void Optimizer::precomputeBoundary(size_t prefix) {
 // Evaluate SDF constraints and cache values/Jacobians.
 double Optimizer::evaluateSDF(const std::vector<Eigen::Quaterniond>& q_state,
                               const std::vector<std::vector<double>>& lambda, double rho) {
-    double max_viol = -1e10;
+    double max_viol = -kBigNum;
     // Skip fixed anchor frames.
     for (size_t i = prefix_; i < N_; ++i) {
         // Relative raw/state rotation.
@@ -179,7 +196,7 @@ double Optimizer::evaluateSDF(const std::vector<Eigen::Quaterniond>& q_state,
             // Coarse test against 4 coarse edges: a corner deeper than margin
             // inside all of them is constraint-inactive (penalty and gradient
             // both zero), so the fine 40-edge pass can be skipped.
-            double d = 1e10;
+            double d = kBigNum;
             for (int e = 0; e < 4; ++e) {
                 const auto& ce = coarse_edges_[i][e];
                 d = std::min(d, ce.n_in.dot(qp - ce.p0) - ce.offset);
@@ -531,15 +548,15 @@ double Optimizer::evaluateObjective(const std::vector<Eigen::Quaterniond>& q_sta
 
 void Optimizer::verifyConstraints(const std::vector<Eigen::Quaterniond>& q_state) {
     int viol_count = 0;
-    double max_sdf_all = -1e10, min_sdf_all = 1e10;
+    double max_sdf_all = -kBigNum, min_sdf_all = kBigNum;
     const auto& boundary = getBoundaryIndices();
 
     // Violations must exceed a physical tolerance: ALM converges to g ~ 0 from
     // the infeasible side, leaving sub-pixel noise between the two warp paths.
-    const double violation_tol = 2.0 * config_.violation_tol_px;   // px; forward-warp acceptance
+    const double violation_tol = kVerifyTolFactor * config_.violation_tol_px;   // px; forward-warp acceptance
 
     double max_delta_deg = 0.0;
-    const double pi = std::acos(-1.0);
+    const double pi = kPi;
 
     double hw2 = (width - 1) / 2.0;
     double hh2 = (height - 1) / 2.0;
@@ -567,8 +584,8 @@ void Optimizer::verifyConstraints(const std::vector<Eigen::Quaterniond>& q_state
             warped.push_back(GeometryTools::transformPoint(grid_point, Ht));
         }
 
-        double max_sdf = -1e10;
-        double frame_min_sdf = 1e10;
+        double max_sdf = -kBigNum;
+        double frame_min_sdf = kBigNum;
         for (int j = 0; j < 4; ++j) {
             double s = GeometryTools::signedDistanceFromPointToPolygon(corners_img[j], warped);
             if (s > max_sdf) max_sdf = s;
@@ -628,14 +645,14 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
     // push a feasible state back out. best_viol starts at +inf so round 1
     // always updates (the raw initial state is never a candidate).
     std::vector<Eigen::Quaterniond> q_best = q_state;
-    double best_viol = 1e10;
-    double best_stat = 1e10;
+    double best_viol = kBigNum;
+    double best_stat = kBigNum;
 
     for (int outer = 0; outer < config_.max_outer; ++outer) {
         double inv_f = 1.0 / focal_length_;
 
         bool inner_stopped = false;
-        double mu_damp = 1e-6;          // GN damping, reset each outer round
+        double mu_damp = kDampInit;       // GN damping, reset each outer round
         int consec_rejects = 0;       // consecutive rejected trials (bail-out guard)
         double viol_step_start = max_viol;   // violation at the start of each accepted step
         int inner = 0;                // accepted steps only
@@ -672,7 +689,7 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
                 }
 
                 // Clamp per-frame increments to 30 deg
-                const double max_angle = std::acos(-1.0) / 6.0;
+                const double max_angle = kMaxStepAngle;
                 for (size_t i = prefix; i < N; ++i) {
                     int ii = static_cast<int>(i - prefix) * 3;
                     Eigen::Vector3d d = dx.segment<3>(ii);
@@ -691,18 +708,18 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
                 const double phi_trial = evaluateObjective(q_trial, rho, inv_f, lambda);
 
                 // Armijo sufficient decrease: Phi_trial <= Phi_cur + c1*grad^T d
-                if (phi_trial <= phi_cur + 1e-4 * b.dot(dx)) {
+                if (phi_trial <= phi_cur + kArmijoC1 * b.dot(dx)) {
                     q_state = q_trial;
                     max_viol = viol_trial;
                     step_norm = dx.norm();
                     dphi = phi_cur - phi_trial;
-                    mu_damp = std::max(mu_damp / 3.0, 1e-9);   // step accepted: more aggressive
+                    mu_damp = std::max(mu_damp / kDampFactor, kDampMin);   // step accepted: more aggressive
                     accepted = true;
                     break;
                 }
                 evaluateSDF(q_state, lambda, rho);   // reject: restore caches to the current state
-                mu_damp *= 3.0;                               // shrink the step, retry
-                if (++consec_rejects > 40 || mu_damp > 1e12) {
+                mu_damp *= kDampFactor;                               // shrink the step, retry
+                if (++consec_rejects > kMaxConsecRejects || mu_damp > kDampMax) {
                     if (config_.verbose)
                         std::cout << "\t[ALM=" << outer + 1 << " | GN=" << inner + 1
                                   << "] stop: damped GN stuck (mu=" << mu_damp << ", |JtR|=" << grad_norm << ")" << std::endl;
@@ -720,14 +737,14 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
             if (config_.verbose) {
                 std::cout << "\t[ALM=" << outer + 1 << " | GN=" << inner << "]"
                           << " |d|=" << step_norm << " | dPhi=" << dphi << " | |JtR|=" << grad_norm;
-                if (mu_damp > 1e-6)
+                if (mu_damp > kDampInit)
                     std::cout << " | mu=" << mu_damp;
             }
 
             // Creeping-step stop: at high rho the step norm never reaches 1e-6,
             // so stop when NEITHER the objective NOR the violation still moves
             // (a tiny dPhi with viol progress must not be cut off).
-            if (dphi < 1e-6 && std::max(0.0, viol_step_start) - std::max(0.0, max_viol) < 1e-3) {
+            if (dphi < kDPhiTol && std::max(0.0, viol_step_start) - std::max(0.0, max_viol) < kViolDropTol) {
                 if (config_.verbose)
                     std::cout << " -> stop: dPhi" << std::endl;
                 inner_stopped = true;
