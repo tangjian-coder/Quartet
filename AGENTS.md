@@ -48,9 +48,12 @@ Per window:
 | `Optimizer.cpp` | `solveWindowGN()` — main GN+ALM solver; `evaluateSDF()` — constraint eval + gradient; `rightJacobianInverseSO3`, `expMap`, `logMap` — SO(3) utilities |
 | `DataLoader.cpp` | `loadRcsGridData()` — RCS grid scaled to center-origin pixel coordinates |
 | `GeometryTools.cpp` | `signedDistanceFromPointToPolygon()` — SDF with optional closest-edge output |
-| `main.cpp` | Sliding-window loop, weight parameters (λ1,λ2,λ3,μ) |
+| `main.cpp` | Sliding-window loop |
 
 ## Tuning Parameters
+
+All solver knobs live in `SolverConfig` (include/Optimizer.h).
+
 | Parameter | Default | Effect |
 |---|---|---|
 | `λ1` | 1.0 | Velocity smoothness |
@@ -59,7 +62,7 @@ Per window:
 | `μ` | 0.02 | Fidelity (lower = more smoothing, closer to boundary) |
 | `ρ_init` | 20.0 | ALM initial penalty |
 | `ρ_max` | 500.0 | ALM max penalty |
-| `γ` | 1.5 | ALM penalty growth rate |
+| `γ` | 2.0 | ALM penalty growth rate |
 | `max_outer` / `max_inner` | 5 / 8 | ALM / GN iteration limits |
 
 ## Coding Style & Naming Conventions
