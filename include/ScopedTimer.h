@@ -2,8 +2,8 @@
 #define SCOPED_TIMER_H
 
 #include <chrono>
+#include <cstdio>
 #include <iostream>
-#include <iomanip>
 #include <string>
 
 #ifdef ENABLE_TIMING
@@ -16,7 +16,10 @@ public:
     ~ScopedTimer() {
         auto end = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(end - start_).count();
-        std::cout << "  [TIME] " << label_ << ": " << std::fixed << std::setprecision(2) << ms << " ms" << std::endl;
+        // Format locally to avoid polluting cout's global format state.
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.2f", ms);
+        std::cout << "  [TIME] " << label_ << ": " << buf << " ms" << std::endl;
     }
 
     ScopedTimer(const ScopedTimer&) = delete;
