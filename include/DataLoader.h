@@ -5,7 +5,6 @@
 #include <string>
 #include <vector>
 #include "FrameData.h"
-#include <yaml-cpp/yaml.h>
 
 class DataLoader {
 public:

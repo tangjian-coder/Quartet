@@ -209,7 +209,6 @@ int main(int argc, char** argv) {
                             loader.crop_factor_v,
                             solver_config);
 
-        // Phase 2: use GN solver
         std::cout << "Window #" << (window_index + 1) << std::endl;
         std::vector<Eigen::Quaterniond> optimized_window = optimizer.solveWindowGN(fixed_prefix_quaternions);
         if (optimized_window.size() != total_window_frames) {

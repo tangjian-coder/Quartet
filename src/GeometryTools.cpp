@@ -1,6 +1,5 @@
 
 #include "GeometryTools.h"
-#include <iostream>
 #include <limits>
 #include <algorithm>
 
@@ -12,25 +11,6 @@ Eigen::Vector2d transformPoint(const Eigen::Vector2d& point, const Eigen::Matrix
     return Eigen::Vector2d(p_transformed.x() / p_transformed.z(), p_transformed.y() / p_transformed.z());
 }
 
-// Helper function to check if a point is inside a polygon using the winding number algorithm.
-bool isPointInsidePolygon(const Eigen::Vector2d& point, const std::vector<Eigen::Vector2d>& polygon) {
-    int winding_number = 0;
-    for (size_t i = 0; i < polygon.size(); ++i) {
-        Eigen::Vector2d p1 = polygon[i];
-        Eigen::Vector2d p2 = polygon[(i + 1) % polygon.size()];
-
-        if (p1.y() <= point.y()) {
-            if (p2.y() > point.y() && (p2.x() - p1.x()) * (point.y() - p1.y()) - (p2.y() - p1.y()) * (point.x() - p1.x()) > 0) {
-                winding_number++;
-            }
-        } else {
-            if (p2.y() <= point.y() && (p2.x() - p1.x()) * (point.y() - p1.y()) - (p2.y() - p1.y()) * (point.x() - p1.x()) < 0) {
-                winding_number--;
-            }
-        }
-    }
-    return winding_number != 0;
-}
 
 double signedDistanceFromPointToPolygon(const Eigen::Vector2d& point, const std::vector<Eigen::Vector2d>& polygon,
                                            int* closest_edge_idx, double* t_param) {

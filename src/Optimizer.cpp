@@ -1,11 +1,9 @@
 #include "Optimizer.h"
-#include "DataLoader.h"
 #include "GeometryTools.h"
 #include "ScopedTimer.h"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
-#include <limits>
 
 // Boundary indices for 11x11 RCS grid (40 outer points vs 121 total)
 static const std::vector<size_t>& getBoundaryIndices() {
