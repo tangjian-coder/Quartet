@@ -30,6 +30,17 @@ Per window:
    - Crop corners: `±(W−1)/2·(1−cropH)`, `±(H−1)/2·(1−cropV)`
    - K matrix: `diag(f, f, 1)` with principal point at (0,0)
 
+## Attitude Convention (c2w / w2c) — verify before deriving pose/warp formulas
+- Pose quaternions from IMU integration (`quat_at`, `adapters/gopro_imu/gopro_common.py`)
+  are rotations whose matrix maps **world-frame coordinates into the current camera
+  frame**: `p_current = R(q) · p_world`. Comments call this convention **"c2w"** — do NOT
+  infer direction from textbook c2w/w2c naming; this behavioral definition is authoritative.
+- Frame poses written to conf/rcs (`gopro_imu_to_input.py`) are `conj(q)` (dubbed "w2c"):
+  they map current-frame coordinates back to the world frame.
+- Same convention as product HIS_V2 (its `integrateGyro` is a first-order approximation
+  of the same family). De-rolling-shutter (row frame -> mid frame) homography:
+  `H = K · R(q_mid) · R(q_row)ᵀ · K⁻¹`.
+
 ## Dependencies
 - Eigen3 (linear algebra)
 - yaml-cpp (config parsing)
