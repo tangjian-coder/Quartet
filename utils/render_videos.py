@@ -60,13 +60,26 @@ def q_to_R(q):
 
 
 def parse_conf(yaml_path):
-    """Read the camera/grid keys with regex; no yaml dependency."""
+    """Read the camera/grid keys with regex; no yaml dependency.
+
+    Both the explicit key names and the legacy product names are accepted, so
+    configs written before the real-K switch keep loading.
+    """
+    fields = [('calFocalX', 'calFocalLength'), ('frameWidth', 'frmWidth'),
+              ('frameHeight', 'frmHeight'), ('cropFactorH', 'gridFrmCropFctrH'),
+              ('cropFactorV', 'gridFrmCropFctrV'), ('gridCols', 'gridCntH'),
+              ('gridRows', 'gridCntV'), ('calFocalY', None),
+              ('calPrincipalX', None), ('calPrincipalY', None)]
     keys = {}
     with open(yaml_path) as f:
         text = f.read()
-    for key in ('calFocalLength', 'frmWidth', 'frmHeight', 'gridFrmCropFctrH', 'gridFrmCropFctrV',
-                'gridCntH', 'gridCntV'):
-        keys[key] = float(re.search(r'^\s*' + key + r'\s*:\s*([0-9.eE+-]+)', text, re.M).group(1))
+    for key, legacy in fields:
+        names = (key,) if legacy is None else (key, legacy)
+        for name in names:
+            m = re.search(r'^\s*' + name + r'\s*:\s*([0-9.eE+-]+)', text, re.M)
+            if m is not None:
+                keys[key] = float(m.group(1))
+                break
     return keys
 
 
@@ -165,9 +178,9 @@ def get_warped_frame(frame, Ht, gridRSC, W, H, frame_w, frame_h, coarse=256, use
 
 def draw_crop_frame(img, fctrH, fctrV, frame_w, frame_h,
                     color=(0, 255, 0), thickness=1):
-    """Overlay the retained crop rect (1 - gridFrmCropFctr) to check black borders.
+    """Overlay the retained crop rect (1 - cropFactor) to check black borders.
 
-    gridFrmCropFctr is the fraction cropped away (fctr/2 per side); the
+    cropFactor is the fraction cropped away (fctr/2 per side); the
     retained rect must stay fully covered after the attitude correction --
     black borders invading it mean the correction is off.
     """
@@ -195,14 +208,25 @@ def main():
 
     # Read camera intrinsics and grid layout from the case config.
     conf = parse_conf(args.yaml)
-    f = conf['calFocalLength']
-    W = int(conf['frmWidth'])
-    H = int(conf['frmHeight'])
+    f = conf['calFocalX']
+    W = int(conf['frameWidth'])
+    H = int(conf['frameHeight'])
+
+    # Center-origin principal point when the config is real-K; the legacy product
+    # config has none and keeps the virtual camera (principal point at zero).
+    cx0, cy0 = (W - 1) / 2, (H - 1) / 2
+    if 'calFocalY' in conf and 'calPrincipalX' in conf:
+        K = np.array([[f, 0.0, conf['calPrincipalX'] - cx0],
+                      [0.0, conf['calFocalY'], conf['calPrincipalY'] - cy0],
+                      [0.0, 0.0, 1.0]])
+    else:
+        K = np.array([[f, 0.0, 0.0], [0.0, f, 0.0], [0.0, 0.0, 1.0]])
+    Kinv = np.linalg.inv(K)
 
     # Load per-frame data: raw quats, optimized quats, distortion grids.
     quats_raw = load_quats(args.quat_raw, skip_first=True)
     quats_opt = load_quats(args.quat_opt, skip_first=False)
-    grids = load_grids(args.grid, int(conf['gridCntV']), int(conf['gridCntH']))
+    grids = load_grids(args.grid, int(conf['gridRows']), int(conf['gridCols']))
     n = min(len(quats_raw), len(quats_opt), len(grids))   # common frame count
 
     # Open the input video and the output writer (same size as the video).
@@ -226,21 +250,18 @@ def main():
         if not ok:
             break
 
-        # Attitude warp: Ht = K * R(q_opt * q_raw^-1) * K^-1, with
-        # K = diag(f, f, 1), so only four entries of R change (K R K^-1).
+        # Attitude warp: Ht = K * R(q_opt * q_raw^-1) * K^-1, with the real K when
+        # the config carries it (its center-origin principal point matches the
+        # RCS grid); otherwise the legacy virtual camera diag(f, f, 1).
         dq = qnormalize(qmul(quats_opt[i], qconj(quats_raw[i])))
-        Ht = np.array(q_to_R(dq), dtype=np.float64)
-        Ht[0, 2] *= f
-        Ht[1, 2] *= f
-        Ht[2, 0] /= f
-        Ht[2, 1] /= f
+        Ht = K @ np.array(q_to_R(dq), dtype=np.float64) @ Kinv
 
         # Warp the raw frame; optionally overlay the crop rect for checking.
         warped_frame = get_warped_frame(frame, Ht, grids[i], W, H, frame_w, frame_h)
 
         if args.draw_grid:
-            draw_crop_frame(warped_frame, conf['gridFrmCropFctrH'],
-                            conf['gridFrmCropFctrV'], frame_w, frame_h)
+            draw_crop_frame(warped_frame, conf['cropFactorH'],
+                            conf['cropFactorV'], frame_w, frame_h)
         # Frame number overlay, top-left, 0-based (black outline + white text).
         if not args.no_frame_number:
             label = str(i)

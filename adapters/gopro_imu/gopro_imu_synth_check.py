@@ -40,8 +40,11 @@ def sim_warp(src, calib, quat_at, t0, q_mid, use_rs=True, use_ldc=True, directio
     """Bidirectional warp for simulation only (local copy, do NOT confuse with
     gopro_imu_validate.warp_virtual / forward_warp): direction selects simulate vs recover
 
-    direction="fwd": apply atan distortion before sampling (correction: output frame -> distorted input frame)
-    direction="inv": apply tan undistortion (simulation: ideal image -> input frame), inverse RS
+    Both directions use the real K on the ideal (corrected) frame, so the pair stays
+    inverse to each other and matches the production chain's coordinate domain.
+
+    direction="fwd": apply atan distortion before sampling (correction: ideal frame -> distorted input frame)
+    direction="inv": apply tan undistortion (simulation: ideal frame -> input frame), inverse RS
     """
     fx, fy, cx, cy = calib["fx"], calib["fy"], calib["cx"], calib["cy"]
     lgamma, wc = calib["lgamma"], np.asarray(calib["wc"])
@@ -49,14 +52,15 @@ def sim_warp(src, calib, quat_at, t0, q_mid, use_rs=True, use_ldc=True, directio
     cx0, cy0 = (W - 1) / 2, (H - 1) / 2
     out = np.zeros((H, W, 3), np.float32)
     ny, nx = np.meshgrid(np.linspace(-1, 1, H), np.linspace(-1, 1, W), indexing="ij")
-    # virtual camera: isotropic f=fx, y uses (H-1)/2
-    rays = np.stack([nx * (W - 1) / 2 / fx, ny * (H - 1) / 2 / fx, np.ones_like(nx)], axis=-1)
+    # Ideal frame rays come from the real K (centered principal point), like forward_warp
+    rays = np.stack([(nx * cx0 + cx0 - cx) / fx, (ny * cy0 + cy0 - cy) / fy,
+                     np.ones_like(nx)], axis=-1)
     for j in range(H):
         q_row = quat_at(t0 + readout * (j + 0.5) / H) if use_rs else q_mid
         # rotation direction consistent with the whole pipeline: R(q_mid x conj(q_row))
         R = quat_to_R(quat_mul(q_mid, quat_conj(q_row)))
         if direction == "inv":
-            # simulate input frame: real pixel -> real-K unproject -> undistort -> inverse RS -> virtual pixel
+            # simulate input frame: ideal pixel -> real-K unproject -> undistort -> inverse RS -> ideal pixel
             px, py = nx[j] * cx0 + cx0, ny[j] * cy0 + cy0
             xu, yu = (px - cx) / fx, (py - cy) / fy
             if use_ldc:
@@ -68,9 +72,9 @@ def sim_warp(src, calib, quat_at, t0, q_mid, use_rs=True, use_ldc=True, directio
             else:
                 xd, yd = xu, yu
             v = (R.T @ np.stack([xd, yd, np.ones_like(xd)])).T
-            sx, sy = fx * v[:, 0] / v[:, 2] + cx0, fx * v[:, 1] / v[:, 2] + cy0
+            sx, sy = fx * v[:, 0] / v[:, 2] + cx, fy * v[:, 1] / v[:, 2] + cy
         else:
-            # correct: virtual pixel (center principal point, f=fx) -> row rotation -> distort -> real pixel
+            # correct: real-K ideal pixel -> row rotation -> distort -> real pixel
             v = rays[j] @ R.T
             xu, yu = v[:, 0] / v[:, 2], v[:, 1] / v[:, 2]
             if use_ldc:
@@ -96,12 +100,11 @@ def sim_warp(src, calib, quat_at, t0, q_mid, use_rs=True, use_ldc=True, directio
 
 
 def map_point(calib, q_row, q_mid, nx, ny, direction="fwd"):
-    """Single-point coordinate mapping: output-frame normalized coords <-> input-frame normalized coords (no resampling)
+    """Single-point coordinate mapping: ideal-frame <-> input-frame pixels (no resampling)
 
-    fwd (correct): virtual pixel -> virtual plane (center principal point, f=fx) -> row rotation -> atan
-                   distortion -> real-K projection -> real pixel
-    inv (simulate): real pixel -> real-K unproject -> undistort (tan inverse) -> inverse rotation ->
-                    virtual plane -> virtual pixel
+    fwd (correct): ideal pixel -> real-K ray -> row rotation -> atan distortion -> real pixel
+    inv (simulate): real pixel -> real-K unproject -> undistort (tan inverse) -> inverse rotation
+                    -> ideal pixel
     Strictly inverse: inv(fwd(p)) == p (rotation/distortion order symmetric)
     """
     fx, fy, cx, cy = calib["fx"], calib["fy"], calib["cx"], calib["cy"]
@@ -110,8 +113,9 @@ def map_point(calib, q_row, q_mid, nx, ny, direction="fwd"):
     # rotation direction: R(q_to x conj(q_from)) — reference (q_to) ray -> row frame (q_from)
     R = quat_to_R(quat_mul(q_mid, quat_conj(q_row)))
     if direction == "fwd":
-        # virtual pixel -> virtual plane (center principal point, isotropic f=fx)
-        ray = np.array([nx * cx0 / fx, ny * cy0 / fx, 1.0])
+        # ideal pixel -> ray via the real K (centered principal point)
+        px, py = nx * cx0 + cx0, ny * cy0 + cy0
+        ray = np.array([(px - cx) / fx, (py - cy) / fy, 1.0])
         v = R @ ray  # row rotation
         xu, yu = v[0] / v[2], v[1] / v[2]
         dx, dy = xu - wc[0], yu - wc[1]
@@ -133,8 +137,8 @@ def map_point(calib, q_row, q_mid, nx, ny, direction="fwd"):
     xd, yd = wc[0] + dx, wc[1] + dy
     v = R.T @ np.array([xd, yd, 1.0])  # inverse rotation
     x_v, y_v = v[0] / v[2], v[1] / v[2]
-    # virtual plane -> virtual pixel (center principal point, isotropic f=fx)
-    return fx * x_v / cx0, fx * y_v / cy0
+    # ideal plane -> ideal pixel (real K)
+    return (fx * x_v + cx - cx0) / cx0, (fy * y_v + cy - cy0) / cy0
 
 
 def geometric_roundtrip(calib, quat_at, t0, q_mid, use_rs=True, use_ldc=True):

@@ -40,11 +40,11 @@ def load_frame(png_path):
 
 
 def warp_virtual(src, calib, quat_at, t0, q_mid, use_rs=True, use_ldc=True, q_ref=None):
-    """Inverse mapping: virtual output frame (center principal point, f=fx, undistorted) -> input frame pixels, bilinear
+    """Inverse mapping: real-K output frame (undistorted) -> input frame pixels, bilinear
 
-    Legacy renderer kept for lock-frame renders (align_check/render). Note: its virtual
-    ray y-scale (f=fx) enters the 3D de-RS rotation -> up to ~8px edge error on dynamic
-    frames; forward_warp (real-K chain) is the physically exact counterpart.
+    Output pixels are unprojected with the real K (fx/fy/cx/cy), so the viewport center is
+    the frame center and wc keeps its meaning as the distortion center of the real camera.
+    Same chain as warp_grid, only sampled inversely per output pixel (forward_warp forward).
 
     use_rs=False: row pose = frame mid pose (distortion only, verify LDC)
     use_ldc=False: skip atan distortion (RS only, verify RSC)
@@ -55,13 +55,16 @@ def warp_virtual(src, calib, quat_at, t0, q_mid, use_rs=True, use_ldc=True, q_re
     readout = calib["readout"]
     q_to = q_ref if q_ref is not None else q_mid
     out = np.zeros((H, W, 3), np.float32)
-    # output pixel grid (normalized, center principal point, isotropic f=fx, y uses (H-1)/2)
+    # Real-K output frame: unproject about the true principal point so the viewport center
+    # is the frame center, where the optimizer's crop window is defined (not at wc).
     ny, nx = np.meshgrid(np.linspace(-1, 1, H), np.linspace(-1, 1, W), indexing="ij")
-    rays = np.stack([nx * (W - 1) / 2 / fx, ny * (H - 1) / 2 / fx, np.ones_like(nx)], axis=-1)
+    px = nx * (W - 1) / 2 + (W - 1) / 2
+    py = ny * (H - 1) / 2 + (H - 1) / 2
+    rays = np.stack([(px - cx) / fx, (py - cy) / fy, np.ones_like(nx)], axis=-1)
     for j in range(H):
         q_row = quat_at(t0 + readout * (j + 0.5) / H) if use_rs else q_mid
-        # rotation direction: R(q_to x conj(q_row)) - reference-frame ray -> row-frame ray
-        # (reversed direction drifted the lock-frame-0 render by 15px; this one by 0.9px)
+        # Same rotation as warp_grid's H = K R(q_to) R(q_row)^T K^-1, applied to the
+        # source-coordinate guess; transposing it here is wrong (see AGENTS.md).
         R = quat_to_R(quat_mul(q_to, quat_conj(q_row)))
         v = rays[j] @ R.T
         xu, yu = v[:, 0] / v[:, 2], v[:, 1] / v[:, 2]
@@ -99,7 +102,7 @@ def forward_warp(src, calib, quat_at, t0, q_mid, use_rs=True, use_ldc=True, q_re
     use_rs=False / use_ldc=False isolate LDC / RS; q_ref overrides the reference (default q_mid).
     Correction grid comes from the shared gopro_common.warp_grid (single implementation,
     same chain to_input uses for rcs.csv).
-    Counterpart of warp_virtual, which samples the same correction inversely on the virtual frame.
+    Counterpart of warp_virtual, which applies the same correction inversely per output pixel.
     """
     q_to = q_ref if q_ref is not None else q_mid
 

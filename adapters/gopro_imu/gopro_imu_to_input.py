@@ -178,7 +178,7 @@ def main():
     # rotated, never the sample positions
     lock_ref = quat_at(time_offset + readout / 2) if "--lock-ref" in sys.argv else None
 
-    # RCS grid: 11x11 regular source grid corrected by the shared warp_grid chain
+    # RCS grid: GRID_H x GRID_V regular source grid corrected by the shared warp_grid chain
     # (real-K LDC + de-RS, per-row poses), then normalized about the frame center
     # (p - (W/H-1)/2) / ((W/H-1)/2) — center-origin [-1,1] grid definition
     cx0, cy0 = (W - 1) / 2, (H - 1) / 2
@@ -199,10 +199,11 @@ def main():
                     vals.append(f"{(grid[j, i, 0] - cx0) / cx0:.6f},{(grid[j, i, 1] - cy0) / cy0:.6f}")
             fr.write(",".join(vals) + "\n")
 
-    # conf.yaml: virtual output camera focal length = fx (center principal point assumption);
-    # real-camera fy/principal point written for the SDF projection in the optimizer
-    write_conf(f"{out_dir}/conf.yaml", calib["fx"], W, H, 0.2, 0.2, GRID_H, GRID_V,
-               fy=calib["fy"], cx=calib["cx"], cy=calib["cy"])
+    # conf.yaml: real-K intrinsics; the RCS grid is center-origin normalized, so the
+    # optimizer converts the principal point back to the frame center when loading
+    write_conf(f"{out_dir}/conf.yaml",
+               fx=calib["fx"], fy=calib["fy"], cx=calib["cx"], cy=calib["cy"],
+               width=W, height=H, crop_h=0.2, crop_v=0.2, grid_h=GRID_H, grid_v=GRID_V)
     print(f"  wrote: {out_dir}/quat.csv ({n_frames} frames) {grid_path} conf.yaml")
     print(f"  calibration table printed above; cross-check time_offset/bias with crisp if in doubt")
 
