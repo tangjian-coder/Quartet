@@ -132,7 +132,9 @@ def plot_quaternion_comparison(data, save_path, png_name='quaternion_comparison.
     # Set x-axis major locator similar to reference
     ax[0].xaxis.set_major_locator(ticker.MultipleLocator(1000000000))
     
-    plt.suptitle('Quaternion Components: Original vs Filtered vs Optimized', fontsize=14, y=0.98)
+    title = ('Quaternion Components: Original vs Filtered vs Optimized'
+             if data.get('filtered') is not None else 'Quaternion Components: Original vs Optimized')
+    plt.suptitle(title, fontsize=14, y=0.98)
     plt.tight_layout(rect=[0, 0, 1, 0.96])  # Adjust for suptitle
     
     # Save figure
@@ -153,12 +155,14 @@ def main():
     ap.add_argument('--png-name', default='quaternion_comparison.png')
     args = ap.parse_args()
 
-    # Load data
-    data = load_quaternion_data(args.original, args.optimized, args.filtered)
+    # Load data (filtered is optional: GoPro runs only have raw + optimized)
+    filtered_path = args.filtered if args.filtered and os.path.exists(args.filtered) else None
+    data = load_quaternion_data(args.original, args.optimized, filtered_path)
 
     print(f"\nData Summary:")
     print(f"  Original frames: {data['original']['frames']}")
-    print(f"  Filtered frames: {data['filtered']['frames']}")
+    if 'filtered' in data:
+        print(f"  Filtered frames: {data['filtered']['frames']}")
     print(f"  Optimized frames: {data['optimized']['frames']}")
 
     # Create output directory

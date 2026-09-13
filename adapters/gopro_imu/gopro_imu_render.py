@@ -1,10 +1,13 @@
-"""GoPro-IMU lock-frame-0 exact renderer (per-pixel, no grid interpolation)
+"""GoPro-IMU renderer: lock-frame-0 (per-pixel) or stabilized output from optimized poses.
 
-Pipeline: output frame (frame-0 mid pose view) -> row pose rotation (incl. RS) -> atan
-distortion -> sample original frame. Same as gopro_imu_validate.warp_virtual with
-q_ref = frame-0 mid pose.
-
-Usage: python3 adapters/gopro_imu/gopro_imu_render.py <seq_dir> <out_dir> [--max-frames N] [--out-name name]
+Pipeline: output frame (q_out view) -> row pose rotation (incl. RS) -> atan distortion ->
+sample original frame. Two paths:
+  default          : gopro_imu_validate.warp_virtual, q_ref = frame-0 mid pose (fix0 render)
+  --opt-quat file  : gopro_common.warp_pixels (real-K inverse map) with q_out = conj(opt[i])
+                     and --row-ref selecting the de-RS row reference (pixel_row / output_row)
+  --fix0           : same warp_pixels path with q_out = frame-0 mid pose (lock frame 0)
+Usage: python3 adapters/gopro_imu/gopro_imu_render.py <seq_dir> <out_dir> [--max-frames N]
+       [--out-name name] [--opt-quat opt.csv] [--fix0] [--row-ref pixel_row|output_row] [--f0 N] [--f1 N]
   seq_dir: sequence dir (parent must contain camera_parameters.h5)
 """
 import sys
@@ -18,7 +21,8 @@ import cv2
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)  # same dir: gopro_common + gopro_imu_* modules
 
-from gopro_common import axis_angle_to_R, integrate_gyro, make_quat_at, fix_timestamps, load_gopro_calib
+from gopro_common import (axis_angle_to_R, integrate_gyro, make_quat_at, fix_timestamps,
+                          load_gopro_calib, quat_conj, warp_pixels)
 from gopro_imu_to_input import load_imu, load_calib
 from gopro_imu_validate import warp_virtual
 
@@ -33,6 +37,15 @@ def main():
     out_name = "fix0_dense.mp4"
     if "--out-name" in sys.argv:
         out_name = sys.argv[sys.argv.index("--out-name") + 1]
+    opt_quat_path = None
+    if "--opt-quat" in sys.argv:
+        opt_quat_path = sys.argv[sys.argv.index("--opt-quat") + 1]
+    fix0 = "--fix0" in sys.argv
+    row_ref = "pixel_row"
+    if "--row-ref" in sys.argv:
+        row_ref = sys.argv[sys.argv.index("--row-ref") + 1]
+    f0 = int(sys.argv[sys.argv.index("--f0") + 1]) if "--f0" in sys.argv else 0
+    f1 = int(sys.argv[sys.argv.index("--f1") + 1]) if "--f1" in sys.argv else 0
     # camera calibration always read from dataset-root camera_parameters.h5
     calib = load_gopro_calib(os.path.join(os.path.dirname(seq_dir), "camera_parameters.h5"))
 
@@ -62,6 +75,15 @@ def main():
     print(f"fps {fps} duration {dur:.2f}s -> {n_frames} frames")
 
     q_ref0 = quat_at(time_offset + calib["readout"] / 2)  # frame-0 mid pose (lock-frame-0 reference)
+    opt_quats = None
+    if opt_quat_path:
+        # optimized poses are stored w2c (as in quat.csv); the internal chain is c2w
+        opt_quats = []
+        with open(opt_quat_path) as fq:
+            for row in fq:
+                v = [float(x) for x in row.replace(',', ' ').split()]
+                if len(v) >= 4:
+                    opt_quats.append(quat_conj(np.array(v[:4])))
 
     cap = cv2.VideoCapture(f"{seq_dir}/video.mp4")
     os.makedirs(out_dir, exist_ok=True)
@@ -69,15 +91,27 @@ def main():
     writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
 
     limit = max_frames or n_frames
+    first = f0
+    last = f1 if f1 > f0 else limit - 1
+    cap.set(cv2.CAP_PROP_POS_FRAMES, first)
     t0 = time.time()
-    for i in range(limit):
+    for i in range(first, last + 1):
         ok, frame = cap.read()
         if not ok:
             break
         t0i = i / fps + time_offset
         q_mid = quat_at(t0i + calib["readout"] / 2)
-        w = warp_virtual(frame, calib, quat_at, t0i, q_mid, True, True, q_ref=q_ref0)
-        out8 = np.clip(w, 0, 255).astype(np.uint8)
+        # one inverse-warp path for both modes; only the output view differs
+        q_out = opt_quats[i] if opt_quats is not None else (q_ref0 if fix0 else None)
+        if q_out is not None:
+            mx, my = warp_pixels(calib, quat_at, t0i, q_out, W, H, row_ref=row_ref)
+            mx = np.where(np.isnan(mx), -1.0, mx).astype(np.float32)
+            my = np.where(np.isnan(my), -1.0, my).astype(np.float32)
+            out8 = cv2.remap(frame, mx, my, cv2.INTER_LINEAR,
+                             borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+        else:
+            w = warp_virtual(frame, calib, quat_at, t0i, q_mid, True, True, q_ref=q_ref0)
+            out8 = np.clip(w, 0, 255).astype(np.uint8)
         # green center-crop rect (20% crop)
         x0, y0, x1, y1 = int(W * 0.1), int(H * 0.1), int(W * 0.9), int(H * 0.9)
         cv2.rectangle(out8, (x0, y0), (x1, y1), (0, 255, 0), 1)

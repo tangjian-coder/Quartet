@@ -28,7 +28,9 @@ Per window:
 3. **Coordinate system**: center-origin pixel coordinates
    - RCS grid: `x = x_rsc × (W−1)/2`, `y = y_rsc × (H−1)/2`
    - Crop corners: `±(W−1)/2·(1−cropH)`, `±(H−1)/2·(1−cropV)`
-   - K matrix: `diag(f, f, 1)` with principal point at (0,0)
+   - K matrix: real K in top-left origin pixels (`calFocalX/Y`, `calPrincipalX/Y`);
+     the loader must center it: `diag(fx, fy, 1)` with principal point
+     `(calPrincipalX − (W−1)/2, calPrincipalY − (H−1)/2)`
 
 ## Attitude Convention (c2w / w2c) — verify before deriving pose/warp formulas
 - Pose quaternions from IMU integration (`quat_at`, `adapters/gopro_imu/gopro_common.py`)
@@ -40,6 +42,14 @@ Per window:
 - Same convention as product HIS_V2 (its `integrateGyro` is a first-order approximation
   of the same family). De-rolling-shutter (row frame -> mid frame) homography:
   `H = K · R(q_mid) · R(q_row)ᵀ · K⁻¹`.
+- Inverse / render chain (`gopro_imu_validate.warp_virtual`, `gopro_common.warp_pixels`)
+  applies the SAME rotation `R(q_to) · R(q_row)ᵀ`, but to the source-coordinate guess rather
+  than to the output ray: it drives rows back to the view frame, so transposing it here is
+  WRONG. Verified by lock-frame-0 far-field drift (reversed direction 15 px vs this one
+  0.9 px), see `gopro_imu_align_check.py` and the row loop in `gopro_imu_validate.py`.
+- `warp_grid` (forward, rcs.csv/constraint chain) and the render chain share ldc, row-time
+  and pose interpolation, but the rotation plays a different role in each (forward maps
+  row-frame points into the view frame; inverse feeds the source-coordinate guess).
 
 ## Dependencies
 - Eigen3 (linear algebra)
@@ -90,6 +100,14 @@ Solver knobs are split by role:
 - Validate by: `cmake --build build --config Release && ./build/quaternion_optimizer`.
 - Verify output CSV and plot via `utils/plot_quaternions.py`.
 - If adding tests, prefer CTest-compatible targets under `tests/`.
+
+## Baselines
+- Real-K stats are regenerated on demand (5 GoPro sequences, `--verbose`); the local
+  snapshot stays outside the repo at `~/data/gopro_imu/output/baseline_realK.txt`.
+- Legacy path (virtual-frame conf + `data/DbgFile_*`): byte-identical to the HEAD build
+  (1095 frames, max abs diff 0.0), so the old case baselines remain valid.
+- Crop-window check: `python3 tests/sdf_scale_check.py <case>`; constraint activity scan
+  showed `cropFactor` must drop to ~0.05-0.10 before the SDF reaches zero on playground3.
 
 ## Commit & Pull Request Guidelines
 - Use clear, imperative commit messages (e.g. `fix: correct RCS grid coordinate scaling`).
