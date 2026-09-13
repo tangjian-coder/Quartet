@@ -1,12 +1,11 @@
 #include "Optimizer.h"
 #include "GeometryTools.h"
+#include "GridLayout.h"
 #include "ScopedTimer.h"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
 
-constexpr int kGridSide = 11;        // RCS grid is kGridSide x kGridSide
-constexpr int kEdgeSegs = kGridSide - 1;
 constexpr double kBigNum = 1e10;     // +inf stand-in for max/min trackers
 constexpr double kPi = 3.14159265358979323846;
 
@@ -21,19 +20,6 @@ constexpr double kMaxStepAngle = kPi / 6.0;   // clamp per-frame increment to 30
 constexpr double kDPhiTol = 1e-6;          // inner stop: objective stalled
 constexpr double kViolDropTol = 1e-3;      // inner stop: violation must also stall
 constexpr double kVerifyTolFactor = 2.0;   // forward-warp check is looser (different path)
-
-// Boundary indices for kGridSide x kGridSide RCS grid (4*kEdgeSegs outer points)
-static const std::vector<size_t>& getBoundaryIndices() {
-    static const std::vector<size_t> idx = []() {
-        std::vector<size_t> v;
-        for (int j = 0; j < kGridSide; ++j) v.push_back(j);
-        for (int i = 1; i <= kEdgeSegs; ++i) v.push_back(i * kGridSide + kEdgeSegs);
-        for (int j = kEdgeSegs - 1; j >= 0; --j) v.push_back(kEdgeSegs * kGridSide + j);
-        for (int i = kEdgeSegs - 1; i > 0; --i) v.push_back(i * kGridSide);
-        return v;
-    }();
-    return idx;
-}
 
 namespace {
 
@@ -165,7 +151,10 @@ void Optimizer::precomputeBoundary(size_t prefix) {
     Eigen::Vector2d corners[4] = {{lx,ty},{rx,ty},{rx,by},{lx,by}};
     for (int j = 0; j < 4; ++j)
         corner_rays_[j] = Kinv * Eigen::Vector3d(corners[j].x(), corners[j].y(), 1.0);
-    focal_length_ = K(0, 0);
+    /* Real K is centered (principal point in center-origin pixels), so Kinv
+     * already carries the offset; only the focal scales are needed separately. */
+    kfx_ = K(0, 0);
+    kfy_ = K(1, 1);
 }
 
 // -----------------------------------------------------------------------
@@ -190,8 +179,10 @@ double Optimizer::evaluateSDF(const std::vector<Eigen::Quaterniond>& q_state,
             // Avoid division by zero.
             if (std::abs(zz) < 1e-6) zz = (zz >= 0.0 ? 1e-6 : -1e-6);
 
-            // Project to image coordinates.
-            Eigen::Vector2d qp(focal_length_ * y.x() / zz, focal_length_ * y.y() / zz);
+            // Project with the full real K: the principal point offsets the
+            // pixel position (it is constant in y, so it drops out of Jproj).
+            Eigen::Vector3d yp = K * y;
+            Eigen::Vector2d qp(yp.x() / zz, yp.y() / zz);
 
             // Coarse test against 4 coarse edges: a corner deeper than margin
             // inside all of them is constraint-inactive (penalty and gradient
@@ -203,7 +194,7 @@ double Optimizer::evaluateSDF(const std::vector<Eigen::Quaterniond>& q_state,
             }
             // Release depth must exceed lambda*f/rho (pixel pressure): the
             // penalty and lambda update both clamp to zero, so -d stays exact.
-            if (d > lambda[i - prefix_][j] * focal_length_ / rho) {
+            if (d > lambda[i - prefix_][j] * kfx_ / rho) {
                 g_cached_[i][j] = -d;   // conservative bound (true viol <= -d)
                 J_cached_[i][j].setZero();
                 max_viol = std::max(max_viol, -d);
@@ -232,8 +223,8 @@ double Optimizer::evaluateSDF(const std::vector<Eigen::Quaterniond>& q_state,
 
                     // Perspective projection Jacobian.
                     Eigen::Matrix<double, 2, 3> Jproj;
-                    Jproj << focal_length_ / zz, 0, -focal_length_ * y.x() / (zz * zz),
-                             0, focal_length_ / zz, -focal_length_ * y.y() / (zz * zz);
+                    Jproj << kfx_ / zz, 0, -kfx_ * y.x() / (zz * zz),
+                             0, kfy_ / zz, -kfy_ * y.y() / (zz * zz);
 
                     // Chain rule to the rotation increment.
                     J_cached_[i][j] = dg_dp.transpose() * Jproj * hat(y) * R_fs;
@@ -649,7 +640,7 @@ std::vector<Eigen::Quaterniond> Optimizer::solveWindowGN(
     double best_stat = kBigNum;
 
     for (int outer = 0; outer < config_.max_outer; ++outer) {
-        double inv_f = 1.0 / focal_length_;
+        double inv_f = 1.0 / kfx_;
 
         bool inner_stopped = false;
         double mu_damp = kDampInit;       // GN damping, reset each outer round

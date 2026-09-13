@@ -17,6 +17,8 @@ public:
     Eigen::Matrix3d K;                // Camera intrinsic matrix
     int width;                        // Image width
     int height;                       // Image height
+    int grid_cols = 11;               // RCS grid control points per row
+    int grid_rows = 11;               // RCS grid control points per column
     double crop_factor_h;             // Horizontal crop factor
     double crop_factor_v;             // Vertical crop factor
 

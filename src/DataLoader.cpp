@@ -1,5 +1,6 @@
 
 #include "DataLoader.h"
+#include "GridLayout.h"
 #include <yaml-cpp/yaml.h>
 #include <fstream>
 #include <iostream>
@@ -91,29 +92,57 @@ bool DataLoader::loadYamlData() {
     try {
         YAML::Node config = YAML::LoadFile(yaml_file_path);
 
-        // Read focal length
-        double focal_length = config["calFocalLength"].as<double>();
-        
-        // Set up camera intrinsic matrix K
-        // K = [f 0 0; 0 f 0; 0 0 1]
+        /* Keys fall back to the legacy virtual-frame names so configs written
+         * before the real-K switch keep loading. */
+        auto read_double = [&config](const char* key, const char* legacy_key, double fallback) {
+            if (config[key]) return config[key].as<double>();
+            if (legacy_key && config[legacy_key]) return config[legacy_key].as<double>();
+            return fallback;
+        };
+
+        // Frame size first: the principal point is centered with it below.
+        width = static_cast<int>(read_double("frameWidth", "frmWidth", 0.0));
+        height = static_cast<int>(read_double("frameHeight", "frmHeight", 0.0));
+        if (width <= 0 || height <= 0) {
+            std::cerr << "Invalid frame size: " << width << " x " << height << std::endl;
+            return false;
+        }
+
+        /* Real intrinsics in top-left origin pixels. Missing calFocalY means an
+         * isotropic lens; legacy configs carry no principal point at all. */
+        double fx = read_double("calFocalX", "calFocalLength", 0.0);
+        double fy = read_double("calFocalY", nullptr, fx);
+        double cx = read_double("calPrincipalX", nullptr, (width - 1) / 2.0);
+        double cy = read_double("calPrincipalY", nullptr, (height - 1) / 2.0);
+        if (fx <= 0.0 || fy <= 0.0) {
+            std::cerr << "Invalid focal length: fx=" << fx << " fy=" << fy << std::endl;
+            return false;
+        }
+
+        /* The RCS grid is center-origin (x_rsc * (W-1)/2), so K must be centered
+         * the same way: cx_centered = calPrincipalX - (W-1)/2. */
+        const double cx_centered = cx - (width - 1) / 2.0;
+        const double cy_centered = cy - (height - 1) / 2.0;
         K.setZero();
-        K(0, 0) = focal_length;
-        K(1, 1) = focal_length;
+        K(0, 0) = fx;
+        K(1, 1) = fy;
+        K(0, 2) = cx_centered;
+        K(1, 2) = cy_centered;
         K(2, 2) = 1.0;
 
-        // Read image width and height
-        width = config["frmWidth"].as<int>();
-        height = config["frmHeight"].as<int>();
-
-        // Read crop factors
-        crop_factor_h = config["gridFrmCropFctrH"].as<double>();
-        crop_factor_v = config["gridFrmCropFctrV"].as<double>();
+        crop_factor_h = read_double("cropFactorH", "gridFrmCropFctrH", 0.0);
+        crop_factor_v = read_double("cropFactorV", "gridFrmCropFctrV", 0.0);
+        grid_cols = static_cast<int>(read_double("gridCols", "gridCntH", kGridSide));
+        grid_rows = static_cast<int>(read_double("gridRows", "gridCntV", kGridSide));
 
         // Log loaded parameters for verification
         std::cout << "Loaded YAML parameters:" << std::endl;
-        std::cout << "  Focal length: " << focal_length << std::endl;
+        std::cout << "  Focal length: fx=" << fx << " fy=" << fy << std::endl;
         std::cout << "  Image size: " << width << " x " << height << std::endl;
+        std::cout << "  Principal point (center-origin): (" << cx_centered << ", " << cy_centered << ")"
+                  << " [top-left: (" << cx << ", " << cy << ")]" << std::endl;
         std::cout << "  Crop factors: H=" << crop_factor_h << ", V=" << crop_factor_v << std::endl;
+        std::cout << "  RCS grid: " << grid_cols << " cols x " << grid_rows << " rows" << std::endl;
 
     } catch (const YAML::Exception& e) {
         std::cerr << "YAML parsing error: " << e.what() << std::endl;
@@ -164,6 +193,20 @@ bool DataLoader::loadRcsGridData() {
     
     if (!frame_data.empty()) {
         size_t expected = frame_data[0].rcs_grid.size();
+        /* The optimizer boundary indexing is hardcoded to kGridSide, so a mismatch
+         * must fail here instead of silently degrading the constraint polygon. */
+        if (grid_cols != kGridSide || grid_rows != kGridSide) {
+            std::cerr << "ERROR: conf declares a " << grid_cols << " x " << grid_rows
+                      << " RCS grid, but the optimizer expects " << kGridSide << " x " << kGridSide
+                      << std::endl;
+            return false;
+        }
+        const size_t configured = static_cast<size_t>(grid_cols) * static_cast<size_t>(grid_rows);
+        if (expected != configured) {
+            std::cerr << "ERROR: RCS grid has " << expected << " points/frame but conf declares "
+                      << grid_cols << " x " << grid_rows << " = " << configured << std::endl;
+            return false;
+        }
         for (size_t i = 1; i < frame_data.size(); ++i) {
             if (frame_data[i].rcs_grid.size() != expected) {
                 std::cerr << "ERROR: Frame " << i << " has " << frame_data[i].rcs_grid.size()

@@ -17,11 +17,13 @@ struct SolverConfig {
     double gamma = 2.0;
     int max_outer = 5;
     int max_inner = 8;
-    double eps_feas = 4e-5;   // Outer: feasibility ||[g]+|| (rad) ≈ violation_tol_px / f
+    /* Feasibility is measured in normalized units (px / kfx), so it ~ matches
+     * violation_tol_px / kfx (5.8e-5 at kfx=868); 4e-5 is the tuned value. */
+    double eps_feas = 4e-5;
     double eps_stat = 1e-3;   // Outer KKT: stationarity (diagnostic only; not used for stopping)
     double eps_comp = 1e-5;   // Outer KKT: complementarity ||lambda (.) g||
-    // Physical violation tolerance (px). The outer loop stops below this
-    // (inverse-warp metric); verifyConstraints accepts up to 2x (forward-warp).
+    /* Tolerance in real-K pixels (kfx ~ 868 for GoPro), so a given angle maps to
+     * a larger px count: ~1.27x stricter than under the old virtual f = 685. */
     double violation_tol_px = 0.05;
     // Inner loop: damped GN with Armijo acceptance — rejected steps raise mu
     // and retry without consuming an iteration. Plain full-step GN was observed
@@ -59,7 +61,9 @@ private:
     // (bulge + margin). A corner inside all of them is constraint-inactive.
     struct CoarseEdge { Eigen::Vector2d p0, n_in; double offset; };
     std::vector<std::array<CoarseEdge, 4>> coarse_edges_;
-    double focal_length_ = 0.0;
+    // Focal scales of the real K (principal point lives only in K/Kinv).
+    double kfx_ = 0.0;
+    double kfy_ = 0.0;
     std::vector<std::vector<double>> g_cached_;
     std::vector<std::vector<Eigen::RowVector3d>> J_cached_;
 
