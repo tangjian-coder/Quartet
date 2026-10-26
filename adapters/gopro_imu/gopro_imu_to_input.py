@@ -2,11 +2,11 @@
 
 Pipeline: imu.h5 --fix_timestamps(keep all samples)--> gyro --minus gbias-->
           camera-frame angular velocity (rot extrinsics) --left-multiply integration-->
-          pose chain (c2w); per-frame output is w2c
+          pose chain (world -> camera: pc = R(q) * pw, same convention as every other stage)
           Row time t = n/fps + time_offset + readout*j/NROW -> slerp -> per-row pose
-          rcs.csv = real-K corrected grid points (LDC + de-RS, row pose vs reference pose),
+          rcs.csv = real-K forward-mapped grid points (LDC + de-RS, row pose vs reference pose),
                     normalized as (p - (W/H-1)/2)/((W/H-1)/2) — center-origin [-1,1]
-          Frame pose = w2c conjugate of q_mid
+          Frame pose = q_mid as-is (w2c), no conjugation
 
 Usage: python3 adapters/gopro_imu/gopro_imu_to_input.py <data_dir> <seq> <out_dir>
        [--readout ms] [--calib-h5 path] [--verify-only] [--lock-ref]
@@ -15,7 +15,6 @@ Usage: python3 adapters/gopro_imu/gopro_imu_to_input.py <data_dir> <seq> <out_di
 """
 import sys
 import os
-import json
 import subprocess
 
 import numpy as np
@@ -30,11 +29,12 @@ from gopro_common import (axis_angle_to_R, integrate_gyro, make_quat_at,
 # LiU GoPro-IMU camera calibration (gopro-hero3.h5 = barn3 sequence; all sequences share it)
 CALIB = dict(fx=868.10363082, fy=881.57627866, cx=987.87297848, cy=529.7808111,
              lgamma=0.8923827203724195, wc=(0.00038555, -0.00340777),
-             readout=0.0316698, fps=29.97)
+             readout=0.0316698, fps=29.97, size=(1920, 1080))
+# fallback only (used when camera_parameters.h5 is missing); main() overrides from calib["size"]
 W, H = 1920, 1080
-# Grid density: 11x11 control points. The C++ optimizer hardcodes kGridSide=11
-# (boundary indices assume an 11x11 grid); 65x65 was both slow and boundary-index-mismatched
-GRID_H, GRID_V = 11, 11
+# Grid density: 55x55 control points. The C++ optimizer's kGridSide (GridLayout.h)
+# must match this value; denser grids cut the griddata render error quadratically.
+GRID_H, GRID_V = 55, 55
 
 
 def probe_video(video_path):
@@ -104,6 +104,26 @@ def static_verify(t, acc, gyro, gbias, abias):
     return g_plus, g_minus, a_norm
 
 
+def build_pose_chain(seq_dir):
+    """Read imu.h5/calibration.yml and build the pose chain in one place.
+
+    Every adapter script used to copy these steps; a convention fix had to be repeated in
+    all of them (and the direction bug lived exactly there). Returns a dict so callers pick
+    what they need: t/acc/gyro, calibration terms, dt/rate, qs and quat_at (with .many).
+    """
+    t, acc, gyro = load_imu(seq_dir)
+    gyro_rate_nom, time_offset, rot, gbias, abias = load_calib(seq_dir)
+    # official timestamp fix: keep all samples, linear-fit uniform axis (only timestamps broken)
+    t_fix = fix_timestamps(t)
+    dt = t_fix[1] - t_fix[0]
+    # bias correction then IMU frame -> camera frame (crisp convention: corrected = raw + bias)
+    omega = (np.vstack([gyro, acc]).T[:, :3] + gbias) @ axis_angle_to_R(rot).T
+    qs = integrate_gyro(omega, dt)
+    return dict(t=t, acc=acc, gyro=gyro, gyro_rate_nom=gyro_rate_nom, time_offset=time_offset,
+                rot=rot, gbias=gbias, abias=abias, dt=dt, rate=1.0 / dt, qs=qs,
+                quat_at=make_quat_at(qs, 1.0 / dt))
+
+
 def main():
     data_dir, seq, out_dir = sys.argv[1], sys.argv[2], sys.argv[3]
     readout = CALIB["readout"]
@@ -130,9 +150,12 @@ def main():
         print("  [WARN] camera_parameters.h5 not found; using embedded CALIB")
 
     seq_dir = f"{data_dir}/{seq}"
-    t, acc, gyro = load_imu(seq_dir)
-    gyro_rate_nom, time_offset, rot, gbias, abias = load_calib(seq_dir)
-    R_gc = axis_angle_to_R(rot)
+    W, H = int(calib["size"][0]), int(calib["size"][1])
+    ch = build_pose_chain(seq_dir)
+    t, acc, gyro = ch["t"], ch["acc"], ch["gyro"]
+    gyro_rate_nom, time_offset, rot = ch["gyro_rate_nom"], ch["time_offset"], ch["rot"]
+    gbias, abias = ch["gbias"], ch["abias"]
+    dt, rate, quat_at = ch["dt"], ch["rate"], ch["quat_at"]
 
     # effective sample rate from median dt (nominal gyro_rate may be unreliable)
     valid = np.isfinite(t)
@@ -148,19 +171,6 @@ def main():
 
     static_verify(t, acc, gyro, gbias, abias)
 
-    # Official timestamp fix: keep every sample (NaN rows hold valid measurements);
-    # index->time global linear fit gives a uniform 1000Hz axis (README Timestamp correction)
-    t_uni = fix_timestamps(t)
-    dt = t_uni[1] - t_uni[0]
-    rate = 1.0 / dt  # only dt/rate used afterwards
-    gyro_uni, _ = gyro.T, acc.T  # all samples kept (acc only used for checks)
-
-    # subtract bias + IMU frame -> camera frame; crisp convention: corrected = raw + bias
-    omega = (gyro_uni + gbias) @ R_gc.T
-
-    qs = integrate_gyro(omega, dt)
-    quat_at = make_quat_at(qs, rate)
-
     fps, vid_dur = probe_video(f"{seq_dir}/video.mp4")
     print(f"  video fps (ffmpeg): {fps}  duration: {vid_dur:.2f}s")
 
@@ -171,7 +181,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     # frame count from actual video duration (gyro stream covers video via time_offset)
-    t_end = (len(qs) - 1) / rate
+    t_end = (len(ch["qs"]) - 1) / rate
     n_frames = int(vid_dur * fps) if vid_dur > 0 else int((t_end - time_offset - readout) * fps)
     # lock-frame-0 grid: q_to = frame-0 mid pose (pose lock baked into the grid, render with Ht=I).
     # Sample coordinates live in the original frame (row) frame; only output rays may be
@@ -189,8 +199,8 @@ def main():
             t0 = n / fps + time_offset
             q_mid = quat_at(t0 + readout / 2)
             q_to = lock_ref if lock_ref is not None else q_mid
-            # frame pose: w2c = conjugate of c2w
-            fq.write(f"{int(n / fps * 1e9)},{q_mid[0]:.9f},{-q_mid[1]:.9f},{-q_mid[2]:.9f},{-q_mid[3]:.9f}\n")
+            # frame pose: the chain is w2c everywhere (pc = R * pw), written as-is
+            fq.write(f"{int(n / fps * 1e9)},{q_mid[0]:.9f},{q_mid[1]:.9f},{q_mid[2]:.9f},{q_mid[3]:.9f}\n")
             # row pose per content row handled inside warp_grid; normalize to center origin
             grid = warp_grid(calib, quat_at, t0, q_to, W, H, GRID_H, GRID_V)
             vals = []

@@ -9,8 +9,6 @@ Output: 2x2 compare image (original / LDC only / RSC only / LDC+RSC) -> <out_dir
 """
 import sys
 import os
-import json
-import subprocess
 import cv2
 from scipy.interpolate import griddata
 
@@ -19,18 +17,23 @@ sys.path.insert(0, _HERE)  # same dir: gopro_common + gopro_imu_* modules
 
 import numpy as np
 
-from gopro_common import quat_mul, quat_conj, quat_to_R, load_gopro_calib, warp_grid
-
-W, H = 1920, 1080
+from gopro_common import load_gopro_calib, warp_grid
+from gopro_imu_to_input import GRID_H, GRID_V
 
 
 def extract_frame(video_path, frame_n, out_png):
-    """Extract frame n via ffmpeg (-ss fast seek, position error <1 frame)"""
-    import imageio_ffmpeg
-    ff = imageio_ffmpeg.get_ffmpeg_exe()
-    subprocess.run([ff, "-y", "-ss", f"{frame_n / 29.97:.3f}", "-i", video_path,
-                    "-frames:v", "1", "-q:v", "2", out_png],
-                   capture_output=True, timeout=60)
+    """Extract frame n by index so the QA figure matches the rendered frame exactly.
+
+    Index seek avoids the <1 frame position error of ffmpeg fast seek. cv2.imwrite
+    expects BGR and encodes RGB itself, so pass the frame through unchanged.
+    """
+    cap = cv2.VideoCapture(video_path)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_n)
+    ok, bgr = cap.read()
+    cap.release()
+    if not ok:
+        raise RuntimeError(f"cannot read frame {frame_n} from {video_path}")
+    cv2.imwrite(out_png, bgr)
 
 
 def load_frame(png_path):
@@ -39,70 +42,21 @@ def load_frame(png_path):
     return (mpimg.imread(png_path)[:, :, :3] * 255.0).astype(np.float32)
 
 
-def warp_virtual(src, calib, quat_at, t0, q_mid, use_rs=True, use_ldc=True, q_ref=None):
-    """Inverse mapping: real-K output frame (undistorted) -> input frame pixels, bilinear
-
-    Output pixels are unprojected with the real K (fx/fy/cx/cy), so the viewport center is
-    the frame center and wc keeps its meaning as the distortion center of the real camera.
-    Same chain as warp_grid, only sampled inversely per output pixel (forward_warp forward).
-
-    use_rs=False: row pose = frame mid pose (distortion only, verify LDC)
-    use_ldc=False: skip atan distortion (RS only, verify RSC)
-    q_ref: reference pose (default frame mid q_mid = lock current frame; frame-0 mid = lock frame 0)
-    """
-    fx, fy, cx, cy = calib["fx"], calib["fy"], calib["cx"], calib["cy"]
-    lgamma, wc = calib["lgamma"], np.asarray(calib["wc"])
-    readout = calib["readout"]
-    q_to = q_ref if q_ref is not None else q_mid
-    out = np.zeros((H, W, 3), np.float32)
-    # Real-K output frame: unproject about the true principal point so the viewport center
-    # is the frame center, where the optimizer's crop window is defined (not at wc).
-    ny, nx = np.meshgrid(np.linspace(-1, 1, H), np.linspace(-1, 1, W), indexing="ij")
-    px = nx * (W - 1) / 2 + (W - 1) / 2
-    py = ny * (H - 1) / 2 + (H - 1) / 2
-    rays = np.stack([(px - cx) / fx, (py - cy) / fy, np.ones_like(nx)], axis=-1)
-    for j in range(H):
-        q_row = quat_at(t0 + readout * (j + 0.5) / H) if use_rs else q_mid
-        # Same rotation as warp_grid's H = K R(q_to) R(q_row)^T K^-1, applied to the
-        # source-coordinate guess; transposing it here is wrong (see AGENTS.md).
-        R = quat_to_R(quat_mul(q_to, quat_conj(q_row)))
-        v = rays[j] @ R.T
-        xu, yu = v[:, 0] / v[:, 2], v[:, 1] / v[:, 2]
-        if use_ldc:
-            dx, dy = xu - wc[0], yu - wc[1]
-            ru = np.hypot(dx, dy)
-            rd = np.arctan(ru * lgamma) / lgamma
-            scale = np.where(ru > 1e-12, rd / np.where(ru > 1e-12, ru, 1.0), 1.0)
-            xd, yd = wc[0] + dx * scale, wc[1] + dy * scale
-        else:
-            xd, yd = xu, yu
-        sx, sy = fx * xd + cx, fy * yd + cy
-        # bilinear sample
-        x0 = np.floor(sx).astype(int)
-        y0 = np.floor(sy).astype(int)
-        ax, ay = sx - x0, sy - y0
-        ok = (x0 >= 0) & (x0 < W - 1) & (y0 >= 0) & (y0 < H - 1)
-        x1, y1 = np.clip(x0 + 1, 0, W - 1), np.clip(y0 + 1, 0, H - 1)
-        x0c, y0c = np.clip(x0, 0, W - 1), np.clip(y0, 0, H - 1)
-        row = (src[y0c, x0c] * (1 - ax)[:, None] + src[y0c, x1] * ax[:, None]) * (1 - ay)[:, None] \
-              + (src[y1, x0c] * (1 - ax)[:, None] + src[y1, x1] * ax[:, None]) * ay[:, None]
-        row[~ok] = 0
-        out[j] = row
-    return out
-
-
 def forward_warp(src, calib, quat_at, t0, q_mid, use_rs=True, use_ldc=True, q_ref=None,
-                gh=31, gv=31):
+                gh=GRID_H, gv=GRID_V):
     """Forward correction mesh: source grid -> LDC (real-K undistort) -> de-RS to q_to frame.
     The warp field is inverse-interpolated (griddata) into a remap table, then resampled (no scatter holes).
 
     Real K throughout (fx/fy/cx/cy); corrected points may leave the frame. De-RS uses per-source-row
-    poses (row time readout*j/(gv-1)) with H = K@R(q_to)@R(q_row)^T@K^-1 (product paradigm).
-    gh/gv: source-grid density (default 31; 31 is already converged for rendering, denser adds nothing).
+    poses (row time readout*j/(gv-1)) with H = K@R(q_to)@R(q_row)^T@K^-1 (w2c forward: the source
+    point's position in the q_to view, the exact inverse of warp_pixels' gather).
+    gh/gv: source-grid density, default = the optimizer grid (GRID_H/GRID_V). Measured against a
+           241x241 reference remap (frame 560): 11x11 p99=11.8 px, 31x31 p99=1.15 px, 55x55 p99=0.36 px,
+           so 31 is NOT converged; keep the adapter density.
     use_rs=False / use_ldc=False isolate LDC / RS; q_ref overrides the reference (default q_mid).
     Correction grid comes from the shared gopro_common.warp_grid (single implementation,
     same chain to_input uses for rcs.csv).
-    Counterpart of warp_virtual, which applies the same correction inversely per output pixel.
+    Counterpart of gopro_common.warp_pixels, which applies the same correction inversely per output pixel.
     """
     q_to = q_ref if q_ref is not None else q_mid
 
@@ -139,20 +93,10 @@ def main():
     calib = load_gopro_calib(calib_path)
     os.makedirs(out_dir, exist_ok=True)
 
-    # rebuild the pose chain exactly like the adapter (rcs.csv grid is too coarse to reuse)
-    from gopro_imu_to_input import load_imu, load_calib
-    from gopro_common import axis_angle_to_R, integrate_gyro, make_quat_at, fix_timestamps
-    import h5py
-
-    t, acc, gyro = load_imu(seq_dir)
-    gyro_rate_nom, time_offset, rot, gbias, abias = load_calib(seq_dir)
-    R_gc = axis_angle_to_R(rot)
-    # official timestamp fix: keep all samples, linear-fit uniform axis (only timestamps broken)
-    t_fix = fix_timestamps(t)
-    dt = t_fix[1] - t_fix[0]
-    du = np.vstack([gyro, acc]).T
-    qs = integrate_gyro((du[:, :3] + gbias) @ R_gc.T, dt)
-    quat_at = make_quat_at(qs, 1.0 / dt)
+    # same pose chain as the adapter (single definition)
+    from gopro_imu_to_input import build_pose_chain
+    ch = build_pose_chain(seq_dir)
+    time_offset, quat_at = ch["time_offset"], ch["quat_at"]
 
     fps = 29.97
     t0 = frame_n / fps + time_offset

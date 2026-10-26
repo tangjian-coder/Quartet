@@ -9,21 +9,22 @@ Output:
 """
 import sys
 import os
-import json
 
 import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)  # same dir: gopro_common + gopro_imu_* modules
 
-from gopro_common import (quat_mul, quat_conj, quat_to_R, axis_angle_to_R, integrate_gyro,
-                          make_quat_at, fix_timestamps, load_gopro_calib)
-from gopro_imu_to_input import load_imu, load_calib
-
-W, H = 1920, 1080
+from gopro_common import quat_mul, quat_conj, quat_to_R, load_gopro_calib
+from gopro_imu_to_input import build_pose_chain
 
 
-def make_grid_image():
+def _size(calib):
+    """Frame size from the calibration (single source; was a hardcoded 1920x1080)."""
+    return int(calib["size"][0]), int(calib["size"][1])
+
+
+def make_grid_image(W, H):
     """Ideal straight-line grid (center 80%, one line per 100px)"""
     img = np.full((H, W, 3), 255.0, np.float32)
     x0, x1 = int(W * 0.1), int(W * 0.9)
@@ -38,7 +39,7 @@ def make_grid_image():
 
 def sim_warp(src, calib, quat_at, t0, q_mid, use_rs=True, use_ldc=True, direction="fwd"):
     """Bidirectional warp for simulation only (local copy, do NOT confuse with
-    gopro_imu_validate.warp_virtual / forward_warp): direction selects simulate vs recover
+    gopro_common.warp_pixels / gopro_imu_validate.forward_warp): direction selects simulate vs recover
 
     Both directions use the real K on the ideal (corrected) frame, so the pair stays
     inverse to each other and matches the production chain's coordinate domain.
@@ -49,6 +50,7 @@ def sim_warp(src, calib, quat_at, t0, q_mid, use_rs=True, use_ldc=True, directio
     fx, fy, cx, cy = calib["fx"], calib["fy"], calib["cx"], calib["cy"]
     lgamma, wc = calib["lgamma"], np.asarray(calib["wc"])
     readout = calib["readout"]
+    H, W = src.shape[:2]
     cx0, cy0 = (W - 1) / 2, (H - 1) / 2
     out = np.zeros((H, W, 3), np.float32)
     ny, nx = np.meshgrid(np.linspace(-1, 1, H), np.linspace(-1, 1, W), indexing="ij")
@@ -57,8 +59,8 @@ def sim_warp(src, calib, quat_at, t0, q_mid, use_rs=True, use_ldc=True, directio
                      np.ones_like(nx)], axis=-1)
     for j in range(H):
         q_row = quat_at(t0 + readout * (j + 0.5) / H) if use_rs else q_mid
-        # rotation direction consistent with the whole pipeline: R(q_mid x conj(q_row))
-        R = quat_to_R(quat_mul(q_mid, quat_conj(q_row)))
+        # gather direction (ideal view -> raw row frame), the same matrix warp_pixels uses
+        R = quat_to_R(quat_mul(q_row, quat_conj(q_mid)))
         if direction == "inv":
             # simulate input frame: ideal pixel -> real-K unproject -> undistort -> inverse RS -> ideal pixel
             px, py = nx[j] * cx0 + cx0, ny[j] * cy0 + cy0
@@ -109,9 +111,10 @@ def map_point(calib, q_row, q_mid, nx, ny, direction="fwd"):
     """
     fx, fy, cx, cy = calib["fx"], calib["fy"], calib["cx"], calib["cy"]
     lgamma, wc = calib["lgamma"], np.asarray(calib["wc"])
+    W, H = _size(calib)
     cx0, cy0 = (W - 1) / 2, (H - 1) / 2
-    # rotation direction: R(q_to x conj(q_from)) — reference (q_to) ray -> row frame (q_from)
-    R = quat_to_R(quat_mul(q_mid, quat_conj(q_row)))
+    # gather: R maps an ideal-view point into the raw row frame (inverse of warp_grid)
+    R = quat_to_R(quat_mul(q_row, quat_conj(q_mid)))
     if direction == "fwd":
         # ideal pixel -> ray via the real K (centered principal point)
         px, py = nx * cx0 + cx0, ny * cy0 + cy0
@@ -144,18 +147,20 @@ def map_point(calib, q_row, q_mid, nx, ny, direction="fwd"):
 def geometric_roundtrip(calib, quat_at, t0, q_mid, use_rs=True, use_ldc=True):
     """Self-consistency: p -> fwd(p) -> inv(p1) should return p (pure coordinate mapping, no resampling)"""
     readout = calib["readout"]
+    W, H = _size(calib)
     errs_fwd_inv, errs_inv_fwd = [], []
     for j in range(0, H, 54):  # 20 sampled rows
         q_row = quat_at(t0 + readout * (j + 0.5) / H) if use_rs else q_mid
         for i in range(0, W, 96):  # 20 sampled columns
             nx, ny = 2 * i / (W - 1) - 1, 2 * j / (H - 1) - 1
-            if use_ldc:
-                p1 = map_point(calib, q_row, q_mid, nx, ny, "fwd")
-                p2 = map_point(calib, q_row, q_mid, p1[0], p1[1], "inv")
-                errs_fwd_inv.append(np.hypot(p2[0] - nx, p2[1] - ny))
-                p1 = map_point(calib, q_row, q_mid, nx, ny, "inv")
-                p2 = map_point(calib, q_row, q_mid, p1[0], p1[1], "fwd")
-                errs_inv_fwd.append(np.hypot(p2[0] - nx, p2[1] - ny))
+            # The round trip must also run with use_ldc=False (RSC-only check); gating it
+            # on use_ldc used to record nothing and report a vacuous 0.0
+            p1 = map_point(calib, q_row, q_mid, nx, ny, "fwd")
+            p2 = map_point(calib, q_row, q_mid, p1[0], p1[1], "inv")
+            errs_fwd_inv.append(np.hypot(p2[0] - nx, p2[1] - ny))
+            p1 = map_point(calib, q_row, q_mid, nx, ny, "inv")
+            p2 = map_point(calib, q_row, q_mid, p1[0], p1[1], "fwd")
+            errs_inv_fwd.append(np.hypot(p2[0] - nx, p2[1] - ny))
     e1 = np.max(errs_fwd_inv) if errs_fwd_inv else 0.0
     e2 = np.max(errs_inv_fwd) if errs_inv_fwd else 0.0
     return e1, e2
@@ -166,18 +171,11 @@ def main():
     seq_dir, frame_n, out_dir = sys.argv[1], int(sys.argv[2]), sys.argv[3]
     # camera calibration always read from dataset-root camera_parameters.h5
     calib = load_gopro_calib(os.path.join(os.path.dirname(seq_dir), "camera_parameters.h5"))
+    W, H = _size(calib)
     os.makedirs(out_dir, exist_ok=True)
 
-    # pose chain identical to the adapter
-    t, acc, gyro = load_imu(seq_dir)
-    gyro_rate_nom, time_offset, rot, gbias, abias = load_calib(seq_dir)
-    R_gc = axis_angle_to_R(rot)
-    # official timestamp fix: keep all samples, linear-fit uniform axis (only timestamps broken)
-    t_fix = fix_timestamps(t)
-    dt = t_fix[1] - t_fix[0]
-    du = np.vstack([gyro, acc]).T
-    qs = integrate_gyro((du[:, :3] + gbias) @ R_gc.T, dt)
-    quat_at = make_quat_at(qs, 1.0 / dt)
+    ch = build_pose_chain(seq_dir)          # same chain the adapter uses
+    time_offset, quat_at = ch["time_offset"], ch["quat_at"]
 
     t0 = frame_n / 29.97 + time_offset
     q_mid = quat_at(t0 + calib["readout"] / 2)
@@ -189,7 +187,7 @@ def main():
     print(f"  geometric round-trip (normalized, ~0): LDC+RSC: fwd->inv={e_fi:.2e} inv->fwd={e_if:.2e}")
     print(f"  geometric round-trip: LDC only={e_ldc:.2e}  RSC only={e_rsc:.2e}")
 
-    ideal = make_grid_image()
+    ideal = make_grid_image(W, H)
 
     # 1) simulate input frame: ideal image -> distortion+RS (undistort direction + inverse RS,
     #    row poses from this frame's real motion)
@@ -220,7 +218,8 @@ def main():
     print(f"  distortion magnitude (corner radial): {ldc_mag:.1f} px   (LDC correction scale)")
     print(f"  RS magnitude (first-last row angle {np.degrees(rs_ang):.4f} deg): ~{rs_mag:.1f} px  (RSC correction scale)")
     for name, e in [("LDC+RSC", err_full), ("LDC only", err_ldc), ("RSC only", err_rsc)]:
-        print(f"  round-trip {name}: mean={e.mean():.3f} max={e.max():.1f} (grid-line 255 = misaligned)")
+        print(f"  image round-trip {name}: mean={e.mean():.3f} max={e.max():.1f} "
+              f"(resampling-limited; judge by the geometric error above)")
 
     import matplotlib.pyplot as plt
     fig, axes = plt.subplots(2, 2, figsize=(16, 9))

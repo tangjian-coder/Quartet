@@ -1,13 +1,13 @@
 """GoPro-IMU renderer: lock-frame-0 (per-pixel) or stabilized output from optimized poses.
 
 Pipeline: output frame (q_out view) -> row pose rotation (incl. RS) -> atan distortion ->
-sample original frame. Two paths:
-  default          : gopro_imu_validate.warp_virtual, q_ref = frame-0 mid pose (fix0 render)
-  --opt-quat file  : gopro_common.warp_pixels (real-K inverse map) with q_out = conj(opt[i])
-                     and --row-ref selecting the de-RS row reference (pixel_row / output_row)
-  --fix0           : same warp_pixels path with q_out = frame-0 mid pose (lock frame 0)
+sample original frame, always through gopro_common.warp_pixels (single inverse-warp path):
+  default          : q_ref = frame-0 mid pose, row_ref="output_row" (legacy fix0 approximation)
+  --opt-quat file  : q_out = opt[i] (already w2c, same convention as quat_at)
+  --fix0           : q_out = frame-0 mid pose (lock frame 0), default --row-ref pixel_row
 Usage: python3 adapters/gopro_imu/gopro_imu_render.py <seq_dir> <out_dir> [--max-frames N]
-       [--out-name name] [--opt-quat opt.csv] [--fix0] [--row-ref pixel_row|output_row] [--f0 N] [--f1 N]
+       [--out-name name] [--opt-quat opt.csv] [--fix0] [--row-ref pixel_row|output_row]
+       [--f0 N] [--f1 N] [--workers N]
   seq_dir: sequence dir (parent must contain camera_parameters.h5)
 """
 import sys
@@ -21,12 +21,8 @@ import cv2
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)  # same dir: gopro_common + gopro_imu_* modules
 
-from gopro_common import (axis_angle_to_R, integrate_gyro, make_quat_at, fix_timestamps,
-                          load_gopro_calib, quat_conj, warp_pixels)
-from gopro_imu_to_input import load_imu, load_calib
-from gopro_imu_validate import warp_virtual
-
-W, H = 1920, 1080
+from gopro_common import load_gopro_calib, warp_pixels
+from gopro_imu_to_input import build_pose_chain
 
 
 def main():
@@ -46,19 +42,14 @@ def main():
         row_ref = sys.argv[sys.argv.index("--row-ref") + 1]
     f0 = int(sys.argv[sys.argv.index("--f0") + 1]) if "--f0" in sys.argv else 0
     f1 = int(sys.argv[sys.argv.index("--f1") + 1]) if "--f1" in sys.argv else 0
+    workers = int(sys.argv[sys.argv.index("--workers") + 1]) if "--workers" in sys.argv else 0
     # camera calibration always read from dataset-root camera_parameters.h5
     calib = load_gopro_calib(os.path.join(os.path.dirname(seq_dir), "camera_parameters.h5"))
+    # frame size comes from the calibration, never from a hardcoded constant
+    W, H = int(calib["size"][0]), int(calib["size"][1])
 
-    # pose chain identical to the adapter
-    t, acc, gyro = load_imu(seq_dir)
-    gyro_rate_nom, time_offset, rot, gbias, abias = load_calib(seq_dir)
-    R_gc = axis_angle_to_R(rot)
-    # official timestamp fix: keep all samples, linear-fit uniform axis (only timestamps broken)
-    t_fix = fix_timestamps(t)
-    dt = t_fix[1] - t_fix[0]
-    du = np.vstack([gyro, acc]).T
-    qs = integrate_gyro((du[:, :3] + gbias) @ R_gc.T, dt)
-    quat_at = make_quat_at(qs, 1.0 / dt)
+    ch = build_pose_chain(seq_dir)          # same chain the adapter writes to rcs.csv
+    time_offset, quat_at = ch["time_offset"], ch["quat_at"]
 
     # video info via ffmpeg
     import imageio_ffmpeg
@@ -77,13 +68,13 @@ def main():
     q_ref0 = quat_at(time_offset + calib["readout"] / 2)  # frame-0 mid pose (lock-frame-0 reference)
     opt_quats = None
     if opt_quat_path:
-        # optimized poses are stored w2c (as in quat.csv); the internal chain is c2w
+        # optimized poses are already w2c, the same convention as quat_at: no conjugation
         opt_quats = []
         with open(opt_quat_path) as fq:
             for row in fq:
                 v = [float(x) for x in row.replace(',', ' ').split()]
                 if len(v) >= 4:
-                    opt_quats.append(quat_conj(np.array(v[:4])))
+                    opt_quats.append(np.array(v[:4]))
 
     cap = cv2.VideoCapture(f"{seq_dir}/video.mp4")
     os.makedirs(out_dir, exist_ok=True)
@@ -92,26 +83,39 @@ def main():
 
     limit = max_frames or n_frames
     first = f0
-    last = f1 if f1 > f0 else limit - 1
+    # --max-frames counts from --f0 (it used to ignore f0 when both were given)
+    last = f1 if f1 > f0 else (min(first + limit, n_frames) - 1)
     cap.set(cv2.CAP_PROP_POS_FRAMES, first)
     t0 = time.time()
+    short_opt = False
     for i in range(first, last + 1):
         ok, frame = cap.read()
         if not ok:
             break
         t0i = i / fps + time_offset
-        q_mid = quat_at(t0i + calib["readout"] / 2)
-        # one inverse-warp path for both modes; only the output view differs
-        q_out = opt_quats[i] if opt_quats is not None else (q_ref0 if fix0 else None)
+        # one inverse-warp path for both modes; only the output view / row ref differs.
+        # The old default (warp_virtual) was this same map with row_ref="output_row".
+        if opt_quats is not None:
+            # optimizer CSV can be one row shorter than the video (e.g. playground1); hold
+            # the last pose instead of aborting the whole render
+            if i >= len(opt_quats):
+                if not short_opt:
+                    print(f"  [WARN] opt-quat has {len(opt_quats)} rows < frame {i}; holding last pose")
+                    short_opt = True
+                q_out = opt_quats[-1]
+            else:
+                q_out = opt_quats[i]
+            rr = row_ref
+        else:
+            q_out = q_ref0
+            rr = row_ref if fix0 else "output_row"
         if q_out is not None:
-            mx, my = warp_pixels(calib, quat_at, t0i, q_out, W, H, row_ref=row_ref)
-            mx = np.where(np.isnan(mx), -1.0, mx).astype(np.float32)
-            my = np.where(np.isnan(my), -1.0, my).astype(np.float32)
+            mx, my = warp_pixels(calib, quat_at, t0i, q_out, W, H, row_ref=rr, workers=workers)
+            # border fill in one pass (map is already float32)
+            mx = np.nan_to_num(mx, nan=-1.0)
+            my = np.nan_to_num(my, nan=-1.0)
             out8 = cv2.remap(frame, mx, my, cv2.INTER_LINEAR,
                              borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
-        else:
-            w = warp_virtual(frame, calib, quat_at, t0i, q_mid, True, True, q_ref=q_ref0)
-            out8 = np.clip(w, 0, 255).astype(np.uint8)
         # green center-crop rect (20% crop)
         x0, y0, x1, y1 = int(W * 0.1), int(H * 0.1), int(W * 0.9), int(H * 0.9)
         cv2.rectangle(out8, (x0, y0), (x1, y1), (0, 255, 0), 1)
@@ -119,9 +123,11 @@ def main():
         cv2.putText(out8, label, (12, 34), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 5, cv2.LINE_AA)
         cv2.putText(out8, label, (12, 34), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2, cv2.LINE_AA)
         writer.write(out8)
-        if (i + 1) % 50 == 0 or i == limit - 1:
+        if (i + 1) % 50 == 0 or i == last:
+            done = i - first + 1
             el = time.time() - t0
-            print(f"{i+1}/{limit} | {el:.0f}s | ETA {el/(i+1)*(limit-i-1):.0f}s", flush=True)
+            print(f"{done}/{last - first + 1} | {el:.0f}s | "
+                  f"ETA {el / done * (last - i):.0f}s", flush=True)
     cap.release()
     writer.release()
     print("Saved:", out_path)
