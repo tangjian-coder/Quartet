@@ -32,24 +32,28 @@ Per window:
      the loader must center it: `diag(fx, fy, 1)` with principal point
      `(calPrincipalX − (W−1)/2, calPrincipalY − (H−1)/2)`
 
-## Attitude Convention (c2w / w2c) — verify before deriving pose/warp formulas
-- Pose quaternions from IMU integration (`quat_at`, `adapters/gopro_imu/gopro_common.py`)
-  are rotations whose matrix maps **world-frame coordinates into the current camera
-  frame**: `p_current = R(q) · p_world`. Comments call this convention **"c2w"** — do NOT
-  infer direction from textbook c2w/w2c naming; this behavioral definition is authoritative.
-- Frame poses written to conf/rcs (`gopro_imu_to_input.py`) are `conj(q)` (dubbed "w2c"):
-  they map current-frame coordinates back to the world frame.
-- Same convention as product HIS_V2 (its `integrateGyro` is a first-order approximation
-  of the same family). De-rolling-shutter (row frame -> mid frame) homography:
-  `H = K · R(q_mid) · R(q_row)ᵀ · K⁻¹`.
-- Inverse / render chain (`gopro_imu_validate.warp_virtual`, `gopro_common.warp_pixels`)
-  applies the SAME rotation `R(q_to) · R(q_row)ᵀ`, but to the source-coordinate guess rather
-  than to the output ray: it drives rows back to the view frame, so transposing it here is
-  WRONG. Verified by lock-frame-0 far-field drift (reversed direction 15 px vs this one
-  0.9 px), see `gopro_imu_align_check.py` and the row loop in `gopro_imu_validate.py`.
-- `warp_grid` (forward, rcs.csv/constraint chain) and the render chain share ldc, row-time
-  and pose interpolation, but the rotation plays a different role in each (forward maps
-  row-frame points into the view frame; inverse feeds the source-coordinate guess).
+## Attitude Convention — ONE convention end to end
+- Every pose in the pipeline (`quat_at`, `quat.csv`, `opt.csv`, ABI to C++/legacy) satisfies
+  **`p_current = R(q) · p_world`** (world -> camera). `integrate_gyro` integrates
+  `dq/dt = -[0, w_body/2] x q`, i.e. `R = exp(-[w]·t)`, which is exactly this convention.
+  Cross-checked against the dataset's own reference implementation (Kontiki
+  `trajectory.h`: `x_world = orientation * x_body`, gyro `= orientation.conjugate()*omega_world`)
+  and by pixel-level tests.
+- Nothing conjugates anymore: `gopro_imu_to_input.py` writes `q_mid` as-is (no `conj`), and
+  `gopro_imu_render.py` reads `opt.csv` as-is. `rcs.csv` and `quat.csv` hold the same w2c poses.
+- De-rolling-shutter (row frame -> view frame) homography, the **forward** map used by
+  `warp_grid` (rcs.csv) and the C++ boundary polygon:
+  `H = K · R(q_view) · R(q_row)ᵀ · K⁻¹`.
+- The renderer (`gopro_common.warp_pixels`) is the **inverse gather**: it rotates the output
+  ray by `R(q_row) · R(q_view)ᵀ`. The two matrices are exact inverses (verified: warp_grid
+  round-trip 0.00 px); using the forward form in the gather doubles the rolling-shutter shear
+  (~38 px) and was the original "stab worse than raw" defect.
+- `utils/render_videos.py` (legacy/product renderer) is already written for this convention:
+  `Ht = K·R(W_opt)·R(W_mid)ᵀ·K⁻¹` warps the RCS grid forward and `griddata` inverts it.
+- Historical note: the pipeline used to integrate the c2w attitude and conjugate only when
+  writing `quat.csv`; `warp_pixels` compensated with the mirrored rotation, so the video looked
+  right while `rcs.csv` (fed to the C++ SDF) was mirrored. Do not reintroduce a per-file
+  convention switch.
 
 ## Dependencies
 - Eigen3 (linear algebra)
