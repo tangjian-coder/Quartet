@@ -42,7 +42,7 @@ def load_frame(png_path):
     return (mpimg.imread(png_path)[:, :, :3] * 255.0).astype(np.float32)
 
 
-def forward_warp(src, calib, quat_at, t0, q_mid, use_rs=True, use_ldc=True, q_ref=None,
+def forward_warp(src, calib, quat_at, t0, q_mid, use_rs=True, ldc_type="fisheye", q_ref=None,
                 gh=GRID_H, gv=GRID_V):
     """Forward correction mesh: source grid -> LDC (real-K undistort) -> de-RS to q_to frame.
     The warp field is inverse-interpolated (griddata) into a remap table, then resampled (no scatter holes).
@@ -53,7 +53,7 @@ def forward_warp(src, calib, quat_at, t0, q_mid, use_rs=True, use_ldc=True, q_re
     gh/gv: source-grid density, default = the optimizer grid (GRID_H/GRID_V). Measured against a
            241x241 reference remap (frame 560): 11x11 p99=11.8 px, 31x31 p99=1.15 px, 55x55 p99=0.36 px,
            so 31 is NOT converged; keep the adapter density.
-    use_rs=False / use_ldc=False isolate LDC / RS; q_ref overrides the reference (default q_mid).
+    use_rs=False / ldc_type=None isolate LDC / RS; q_ref overrides the reference (default q_mid).
     Correction grid comes from the shared gopro_common.warp_grid (single implementation,
     same chain to_input uses for rcs.csv).
     Counterpart of gopro_common.warp_pixels, which applies the same correction inversely per output pixel.
@@ -61,7 +61,7 @@ def forward_warp(src, calib, quat_at, t0, q_mid, use_rs=True, use_ldc=True, q_re
     q_to = q_ref if q_ref is not None else q_mid
 
     frame_h, frame_w = src.shape[:2]
-    grid = warp_grid(calib, quat_at, t0, q_to, frame_w, frame_h, gh, gv, use_rs, use_ldc)
+    grid = warp_grid(calib, quat_at, t0, q_to, frame_w, frame_h, gh, gv, use_rs, ldc_type)
     grid_uniform = np.stack(np.meshgrid(np.linspace(0, frame_w - 1, gh, dtype=np.float32),
                                         np.linspace(0, frame_h - 1, gv, dtype=np.float32)),
                             axis=-1)

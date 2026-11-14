@@ -164,7 +164,7 @@ def fix_timestamps(t):
     return np.arange(len(t)) * k + m
 
 
-def ldc_undistort(xn, yn, wc, lgamma):
+def fisheye_undistort(xn, yn, wc, lgamma):
     """Distorted normalized coords -> undistorted, about the distortion center wc."""
     dx, dy = xn - wc[0], yn - wc[1]
     rd = np.hypot(dx, dy)
@@ -179,7 +179,7 @@ def ldc_undistort(xn, yn, wc, lgamma):
     return wc[0] + dx * scale, wc[1] + dy * scale
 
 
-def ldc_distort(xu, yu, wc, lgamma):
+def fisheye_distort(xu, yu, wc, lgamma):
     """Undistorted normalized coords -> distorted (forward atan model), about wc."""
     dx, dy = xu - wc[0], yu - wc[1]
     # sqrt/maximum instead of hypot/nested where: this runs per pixel per iteration
@@ -187,6 +187,29 @@ def ldc_distort(xu, yu, wc, lgamma):
     rd = np.arctan(ru * lgamma) / lgamma
     scale = np.where(ru > 1e-12, rd / np.maximum(ru, 1e-12), 1.0)
     return wc[0] + dx * scale, wc[1] + dy * scale
+
+
+def radtan_distort(xn, yn, params):
+    """OpenCV radial-tangential: undistorted normalised coords -> distorted."""
+    k1, k2, p1, p2 = params
+    r2 = xn * xn + yn * yn
+    radial = 1.0 + k1 * r2 + k2 * r2 * r2
+    return (xn * radial + 2.0 * p1 * xn * yn + p2 * (r2 + 2.0 * xn * xn),
+            yn * radial + p1 * (r2 + 2.0 * yn * yn) + 2.0 * p2 * xn * yn)
+
+
+def radtan_undistort(xd, yd, params):
+    """Invert radtan_distort by fixed point; 5 passes reach ~1e-7 in normalised units."""
+    k1, k2, p1, p2 = params
+    xn, yn = xd, yd
+    for _ in range(5):
+        r2 = xn * xn + yn * yn
+        radial = 1.0 + k1 * r2 + k2 * r2 * r2
+        dx = 2.0 * p1 * xn * yn + p2 * (r2 + 2.0 * xn * xn)
+        dy = p1 * (r2 + 2.0 * yn * yn) + 2.0 * p2 * xn * yn
+        xn = (xd - dx) / radial
+        yn = (yd - dy) / radial
+    return xn, yn
 
 
 def row_time(t0, readout, s, n, ref="pixel_row"):
@@ -202,7 +225,7 @@ def row_time(t0, readout, s, n, ref="pixel_row"):
 
 
 def warp_grid(calib, quat_at, t0, q_to, frame_w, frame_h, gh=31, gv=31,
-              use_rs=True, use_ldc=True):
+              use_rs=True, ldc_type="fisheye"):
     """LDC + de-RS correction of a regular source-frame grid, real K throughout.
 
     Grid points are source-frame pixels (top-left origin, linspace 0..W-1 / H-1); each
@@ -212,6 +235,10 @@ def warp_grid(calib, quat_at, t0, q_to, frame_w, frame_h, gh=31, gv=31,
     Returns corrected grid (gv, gh, 2) in real-K pixels; points may leave the frame.
     This is the optimizer-input RCS chain (to_input) and the correction core of
     validate.forward_warp; single implementation shared by both.
+
+    ldc_type selects the lens-distortion-correction model: "fisheye" (atan/equidistant,
+    lgamma+wc), "radtan" (OpenCV k1,k2,p1,p2) or None to keep the raw grid. This is the
+    forward chain, so the model runs in the "remove distortion" direction.
     """
     fx, fy, cx, cy = calib["fx"], calib["fy"], calib["cx"], calib["cy"]
     lgamma, wc = calib["lgamma"], np.asarray(calib["wc"])
@@ -221,11 +248,16 @@ def warp_grid(calib, quat_at, t0, q_to, frame_w, frame_h, gh=31, gv=31,
     y = np.linspace(0, frame_h - 1, gv, dtype=np.float32)
     grid = np.stack(np.meshgrid(x, y), axis=-1)
 
-    if use_ldc:
-        # Unproject with real K (no virtual-camera assumption), then undistort about wc
+    if ldc_type is not None:
+        # Unproject with real K (no virtual-camera assumption), then undistort
         xn = (grid[..., 0] - cx) / fx
         yn = (grid[..., 1] - cy) / fy
-        xu, yu = ldc_undistort(xn, yn, wc, lgamma)
+        if ldc_type == "fisheye":
+            xu, yu = fisheye_undistort(xn, yn, wc, lgamma)
+        elif ldc_type == "radtan":
+            xu, yu = radtan_undistort(xn, yn, calib["radtan"])
+        else:
+            raise ValueError(f"unknown ldc_type: {ldc_type}")
         grid[..., 0], grid[..., 1] = fx * xu + cx, fy * yu + cy
 
     if use_rs:
@@ -263,9 +295,9 @@ def _dispatch(blocks, fn, workers):
             fn(b)
 
 
-def warp_pixels(calib, quat_at, t0, q_out, frame_w, frame_h, use_rs=True, use_ldc=True,
+def warp_pixels(calib, quat_at, t0, q_out, frame_w, frame_h, use_rs=True,
                 row_ref="pixel_row", max_iter=3, tol=0.01, chunk=MAP_CHUNK, workers=0,
-                undistort=None, scan_axis="row"):
+                undistort=None, scan_axis="row", ldc_type="fisheye"):
     """Inverse per-pixel mapping for rendering: output pixels -> source pixels (gather).
 
     Real K throughout. De-RS applies the INVERSE of the forward correction: the ray of an
@@ -279,8 +311,12 @@ def warp_pixels(calib, quat_at, t0, q_out, frame_w, frame_h, use_rs=True, use_ld
 
     quat_at   : callable returning a pose for a time; MUST expose .many(times) -> (n,4)
                 (both make_quat_at implementations do).
-    undistort : optional callable (xu, yu) -> (xd, yd) overriding the fisheye model, for
-                cameras whose distortion is not the GoPro LDC (e.g. ADVIO radtan).
+    ldc_type  : lens-distortion-correction model applied when sampling the source,
+                "fisheye" (atan, lgamma+wc), "radtan" (OpenCV k1,k2,p1,p2) or None to skip
+                the correction. This chain is the INVERSE one, so it runs the "add
+                distortion" direction.
+    undistort : optional callable (xu, yu) -> (xd, yd) taking precedence over ldc_type
+                (kept for callers that bind model parameters themselves).
     scan_axis : "row" for landscape capture (default, unchanged) or "col" for portrait
                 capture, where the sensor reads columns and de-RS iterates the source column.
     """
@@ -298,9 +334,13 @@ def warp_pixels(calib, quat_at, t0, q_out, frame_w, frame_h, use_rs=True, use_ld
     def _apply_dist(xu, yu):
         if undistort is not None:
             return undistort(xu, yu)
-        if use_ldc:
-            return ldc_distort(xu, yu, wc, lgamma)
-        return xu, yu
+        if ldc_type is None:
+            return xu, yu
+        if ldc_type == "fisheye":
+            return fisheye_distort(xu, yu, wc, lgamma)
+        if ldc_type == "radtan":
+            return radtan_distort(xu, yu, calib["radtan"])
+        raise ValueError(f"unknown ldc_type: {ldc_type}")
 
     # Per-source-row poses: one scalar interpolation per row, shared by every pixel.
     scan_n = frame_h if scan_axis == "row" else frame_w
@@ -419,7 +459,7 @@ def load_gopro_calib(h5_path):
     """Read camera calibration from camera_parameters.h5 (LiU GoPro-IMU dataset root)
 
     h5 contents: K(3x3), lgamma, wc(2), readout, fps, size(2)
-    Returns dict(fx,fy,cx,cy,lgamma,wc,readout,fps,size)
+    Returns dict(fx,fy,cx,cy,lgamma,wc,readout,fps,size,ldc_type)
     """
     import h5py
     with h5py.File(h5_path, "r") as f:
@@ -431,4 +471,5 @@ def load_gopro_calib(h5_path):
             wc=f["wc"][()].tolist(),
             readout=float(f["readout"][()]),
             fps=float(f["fps"][()]),
-            size=f["size"][()].tolist())
+            size=f["size"][()].tolist(),
+            ldc_type="fisheye")
