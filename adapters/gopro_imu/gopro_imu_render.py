@@ -11,8 +11,9 @@ Usage: python3 adapters/gopro_imu/gopro_imu_render.py <seq_dir> <out_dir> (--fix
        [--max-frames N] [--out-name name] [--f0 N] [--f1 N] [--workers N]
   seq_dir: sequence dir (parent must contain camera_parameters.h5)
 """
-import sys
+import argparse
 import os
+import sys
 import time
 import subprocess
 
@@ -27,27 +28,30 @@ from gopro_imu_to_input import build_pose_chain
 
 
 def main():
-    seq_dir, out_dir = sys.argv[1], sys.argv[2]
-    max_frames = 0
-    if "--max-frames" in sys.argv:
-        max_frames = int(sys.argv[sys.argv.index("--max-frames") + 1])
-    opt_quat_path = None
-    if "--opt-quat" in sys.argv:
-        opt_quat_path = sys.argv[sys.argv.index("--opt-quat") + 1]
-    fix0 = "--fix0" in sys.argv
+    ap = argparse.ArgumentParser(description="GoPro-IMU per-pixel renderer")
+    ap.add_argument("seq_dir", help="sequence dir; the parent must hold camera_parameters.h5")
+    ap.add_argument("out_dir")
+    ap.add_argument("--fix0", action="store_true",
+                    help="lock the view to frame 0 (verification: a correct chain holds still)")
+    ap.add_argument("--opt-quat", default=None,
+                    help="optimized w2c poses (w,x,y,z per row); renders the stabilized view")
+    ap.add_argument("--max-frames", type=int, default=0, help="frames to render from --f0")
+    ap.add_argument("--out-name", default=None, help="default: fix0_dense.mp4 / stab_dense.mp4")
+    ap.add_argument("--f0", type=int, default=0)
+    ap.add_argument("--f1", type=int, default=0, help="last frame; ignored when <= --f0")
+    ap.add_argument("--workers", type=int, default=0, help="0 = auto")
+    a = ap.parse_args()
+    seq_dir, out_dir = a.seq_dir, a.out_dir
     # fix0 is a verification mode, not a default: the two modes answer different questions
-    if fix0 and opt_quat_path:
-        sys.exit("--fix0 and --opt-quat are mutually exclusive")
-    if not fix0 and not opt_quat_path:
-        sys.exit("pick a mode: --fix0 (lock frame 0, verify the pose chain) "
+    if a.fix0 and a.opt_quat:
+        ap.error("--fix0 and --opt-quat are mutually exclusive")
+    if not a.fix0 and not a.opt_quat:
+        ap.error("pick a mode: --fix0 (lock frame 0, verify the pose chain) "
                  "or --opt-quat <csv> (stabilized render)")
+    fix0, opt_quat_path = a.fix0, a.opt_quat
+    max_frames, f0, f1, workers = a.max_frames, a.f0, a.f1, a.workers
     # the default file name states which question the output answers
-    out_name = "fix0_dense.mp4" if fix0 else "stab_dense.mp4"
-    if "--out-name" in sys.argv:
-        out_name = sys.argv[sys.argv.index("--out-name") + 1]
-    f0 = int(sys.argv[sys.argv.index("--f0") + 1]) if "--f0" in sys.argv else 0
-    f1 = int(sys.argv[sys.argv.index("--f1") + 1]) if "--f1" in sys.argv else 0
-    workers = int(sys.argv[sys.argv.index("--workers") + 1]) if "--workers" in sys.argv else 0
+    out_name = a.out_name or ("fix0_dense.mp4" if fix0 else "stab_dense.mp4")
     # camera calibration always read from dataset-root camera_parameters.h5
     calib = load_gopro_calib(os.path.join(os.path.dirname(seq_dir), "camera_parameters.h5"))
     # frame size comes from the calibration, never from a hardcoded constant
