@@ -85,7 +85,7 @@ def main():
     out_dir = a.out_dir or os.path.join(ac.ADVIO_DIR, 'output', base, a.seq)
     os.makedirs(out_dir, exist_ok=True)
 
-    t_frames, quat_at, n = ac.make_quat_at(a.seq, a.pose, True, 0.0)
+    t_frames, quat_at, n = ac.make_quat_at(a.seq, a.pose)
     W, H, n_video, fps = ac.video_info(a.seq)
     if n != n_video:
         # the optimizer indexes poses and frames 1:1, so a mismatch would shift the video
@@ -104,11 +104,9 @@ def main():
     print(f'{a.seq}: {len(t_frames)} frames {W}x{H} f={calib["fx"]:.1f} -> {out_dir}')
     print(f'  rcs: {shared}  (shared {GRID_H}x{GRID_V} {calib["ldc_type"]} grid, pass to --rcs)')
     if a.debug:
-        # Two things are easy to get wrong here: the c2w/w2c reading of the pose files and
-        # whether the grid matches the frame, so print both instead of guessing.
-        _, raw_at, _ = ac.make_quat_at(a.seq, a.pose, False, 0.0)
-        print(f'  debug: frame0 quat written (converted) = {np.round(quat_at(t_frames[0]), 5)}')
-        print(f'  debug: frame0 quat unconverted        = {np.round(raw_at(t_frames[0]), 5)}')
+        # The grid is what silently goes wrong (wrong model or wrong normalization base),
+        # so print what actually reached the file instead of restating the inputs.
+        print(f'  debug: frame0 quat = {np.round(quat_at(t_frames[0]), 5)}')
         print(f'  debug: principal ({calib["cx"]:.3f}, {calib["cy"]:.3f}) vs '
               f'frame center ({W/2:.1f}, {H/2:.1f})')
         print(f'  debug: radtan={calib["radtan"]} source={calib["source"]}')
