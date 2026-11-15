@@ -9,12 +9,9 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-from common import (SLERP_LIN_D, MAP_CHUNK, THREAD_MIN_PIXELS,   # noqa: E402,F401
-                    quat_mul, quat_conj, quat_to_R, quat_to_R_many, R_to_quat,
-                    axis_angle_to_R, R_to_rotvec, rotvec_to_R, slerp,
-                    integrate_gyro, row_time,
-                    fisheye_distort, fisheye_undistort,
-                    radtan_distort, radtan_undistort,
+# re-exported for the GoPro scripts, which import these names from here
+from common import (SLERP_LIN_D, quat_mul, quat_conj, quat_to_R,   # noqa: E402,F401
+                    axis_angle_to_R, integrate_gyro,
                     warp_grid, warp_pixels, write_conf)
 
 

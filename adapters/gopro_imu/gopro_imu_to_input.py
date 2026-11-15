@@ -30,8 +30,6 @@ from gopro_common import (axis_angle_to_R, integrate_gyro, make_quat_at,
 CALIB = dict(fx=868.10363082, fy=881.57627866, cx=987.87297848, cy=529.7808111,
              lgamma=0.8923827203724195, wc=(0.00038555, -0.00340777),
              readout=0.0316698, fps=29.97, size=(1920, 1080))
-# fallback only (used when camera_parameters.h5 is missing); main() overrides from calib["size"]
-W, H = 1920, 1080
 # Grid density: 55x55 control points. The C++ optimizer's kGridSide (GridLayout.h)
 # must match this value; denser grids cut the griddata render error quadratically.
 GRID_H, GRID_V = 55, 55
@@ -126,9 +124,9 @@ def build_pose_chain(seq_dir):
 
 def main():
     data_dir, seq, out_dir = sys.argv[1], sys.argv[2], sys.argv[3]
-    readout = CALIB["readout"]
+    readout_override = None
     if "--readout" in sys.argv:
-        readout = float(sys.argv[sys.argv.index("--readout") + 1]) / 1000.0
+        readout_override = float(sys.argv[sys.argv.index("--readout") + 1]) / 1000.0
     verify_only = "--verify-only" in sys.argv
     # Camera calibration: default reads data_dir/camera_parameters.h5; --calib-h5 overrides;
     # CALIB constant is only a fallback if the file is missing
@@ -148,6 +146,8 @@ def main():
                          readout=float(f["readout"][()]), fps=float(f["fps"][()]))
     else:
         print("  [WARN] camera_parameters.h5 not found; using embedded CALIB")
+    # the h5 value wins; --readout exists to try a different readout without editing it
+    readout = calib["readout"] if readout_override is None else readout_override
 
     seq_dir = f"{data_dir}/{seq}"
     W, H = int(calib["size"][0]), int(calib["size"][1])
@@ -167,7 +167,7 @@ def main():
     print(f"  effective rate (median dt): {gyro_rate_eff:.1f}Hz  nominal gyro_rate: {gyro_rate_nom}Hz")
     print(f"  time_offset={time_offset:.4f}s  rot(axis-angle)={rot}")
     print(f"  camera: fx={calib['fx']:.3f} fy={calib['fy']:.3f} cx={calib['cx']:.3f} cy={calib['cy']:.3f}"
-          f" lgamma={calib['lgamma']:.5f} readout={calib['readout']*1000:.4f}ms")
+          f" lgamma={calib['lgamma']:.5f} readout={readout*1000:.4f}ms")
 
     static_verify(t, acc, gyro, gbias, abias)
 

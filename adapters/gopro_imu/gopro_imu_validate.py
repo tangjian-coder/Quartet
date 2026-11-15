@@ -7,8 +7,10 @@ Usage: python3 adapters/gopro_imu/gopro_imu_validate.py <seq_dir> [frame_n] [out
 
 Output: 2x2 compare image (original / LDC only / RSC only / LDC+RSC) -> <out_dir>/compare_<frame_n>.png
 """
-import sys
+import argparse
 import os
+import sys
+
 import cv2
 from scipy.interpolate import griddata
 
@@ -18,7 +20,7 @@ sys.path.insert(0, _HERE)  # same dir: gopro_common + gopro_imu_*; common.py is 
 import numpy as np
 
 from gopro_common import load_gopro_calib, warp_grid
-from gopro_imu_to_input import GRID_H, GRID_V
+from gopro_imu_to_input import GRID_H, GRID_V, probe_video
 
 
 def extract_frame(video_path, frame_n, out_png):
@@ -84,10 +86,14 @@ def forward_warp(src, calib, quat_at, t0, q_mid, use_rs=True, ldc_type="fisheye"
 
 
 def main():
-    # CLI: <seq_dir> [frame_n] [out_dir]; defaults target apple3 for debugging
-    seq_dir = sys.argv[1] if len(sys.argv) > 1 else "/home/tangjian5/data/gopro_imu/gopro-imu-dataset/apple3"
-    frame_n = int(sys.argv[2]) if len(sys.argv) > 2 else 200
-    out_dir = sys.argv[3] if len(sys.argv) > 3 else "/home/tangjian5/data/gopro_imu/output/apple3"
+    ap = argparse.ArgumentParser(description="LDC / RSC / full correction comparison for one frame")
+    ap.add_argument("seq_dir", help="sequence dir; the parent must hold camera_parameters.h5")
+    ap.add_argument("frame_n", nargs="?", type=int, default=200)
+    ap.add_argument("out_dir", nargs="?", default=None)
+    a = ap.parse_args()
+    seq_dir, frame_n = a.seq_dir, a.frame_n
+    out_dir = a.out_dir or os.path.join(
+        os.path.dirname(os.path.dirname(seq_dir)), "output", os.path.basename(seq_dir))
     # camera calibration always read from dataset-root camera_parameters.h5
     calib_path = os.path.join(os.path.dirname(seq_dir), "camera_parameters.h5")
     calib = load_gopro_calib(calib_path)
@@ -98,7 +104,7 @@ def main():
     ch = build_pose_chain(seq_dir)
     time_offset, quat_at = ch["time_offset"], ch["quat_at"]
 
-    fps = 29.97
+    fps, _ = probe_video(f"{seq_dir}/video.mp4")
     t0 = frame_n / fps + time_offset
     q_mid = quat_at(t0 + calib["readout"] / 2)
 

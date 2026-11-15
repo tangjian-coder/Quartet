@@ -7,8 +7,9 @@ Output:
 - numeric: distortion/RS correction magnitudes (pixels), round-trip error (should be ~0)
 - image: ideal grid / simulated input / recovered / error magnified
 """
-import sys
+import argparse
 import os
+import sys
 
 import numpy as np
 
@@ -16,7 +17,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)  # same dir: gopro_common + gopro_imu_*; common.py is one level up
 
 from gopro_common import quat_mul, quat_conj, quat_to_R, load_gopro_calib
-from gopro_imu_to_input import build_pose_chain
+from gopro_imu_to_input import build_pose_chain, probe_video
 
 
 def _size(calib):
@@ -168,7 +169,12 @@ def geometric_roundtrip(calib, quat_at, t0, q_mid, use_rs=True, use_ldc=True):
 
 
 def main():
-    seq_dir, frame_n, out_dir = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+    ap = argparse.ArgumentParser(description="synthetic distortion+RS round-trip check")
+    ap.add_argument("seq_dir", help="sequence dir; the parent must hold camera_parameters.h5")
+    ap.add_argument("frame_n", type=int)
+    ap.add_argument("out_dir")
+    a = ap.parse_args()
+    seq_dir, frame_n, out_dir = a.seq_dir, a.frame_n, a.out_dir
     # camera calibration always read from dataset-root camera_parameters.h5
     calib = load_gopro_calib(os.path.join(os.path.dirname(seq_dir), "camera_parameters.h5"))
     W, H = _size(calib)
@@ -177,7 +183,8 @@ def main():
     ch = build_pose_chain(seq_dir)          # same chain the adapter uses
     time_offset, quat_at = ch["time_offset"], ch["quat_at"]
 
-    t0 = frame_n / 29.97 + time_offset
+    fps, _ = probe_video(f"{seq_dir}/video.mp4")
+    t0 = frame_n / fps + time_offset
     q_mid = quat_at(t0 + calib["readout"] / 2)
 
     # geometric self-consistency (pure coordinate mapping, unaffected by resampling)
