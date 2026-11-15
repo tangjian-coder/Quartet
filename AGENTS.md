@@ -44,12 +44,20 @@ Per window:
 - De-rolling-shutter (row frame -> view frame) homography, the **forward** map used by
   `warp_grid` (rcs.csv) and the C++ boundary polygon:
   `H = K · R(q_view) · R(q_row)ᵀ · K⁻¹`.
-- The renderer (`gopro_common.warp_pixels`) is the **inverse gather**: it rotates the output
+- The renderer (`common.warp_pixels`) is the **inverse gather**: it rotates the output
   ray by `R(q_row) · R(q_view)ᵀ`. The two matrices are exact inverses (verified: warp_grid
   round-trip 0.00 px); using the forward form in the gather doubles the rolling-shutter shear
   (~38 px) and was the original "stab worse than raw" defect.
+- Both renderers require an explicit mode: `--fix0` (lock the view to the first rendered frame,
+  a verification that a correct chain holds still) or `--opt-quat` (final stabilized output).
+  fix0 is never the default, and the single-pass `output_row` variant is gone: every mode
+  iterates the source row so the de-RS solve is self-consistent.
 - `utils/render_videos.py` (legacy/product renderer) is already written for this convention:
   `Ht = K·R(W_opt)·R(W_mid)ᵀ·K⁻¹` warps the RCS grid forward and `griddata` inverts it.
+- ADVIO: ARKit and ground-truth files are camera->world, so `advio_common.make_quat_at`
+  conjugates them on import; the gyro branch left-multiplies `R_cam_imu` (w2c composition).
+  There is no switch for the other reading: treating those files as w2c measured 4-8x worse
+  fix0 residual (arkit 0.42 -> 3.25 px, gt 0.88 -> 4.45 px).
 - Historical note: the pipeline used to integrate the c2w attitude and conjugate only when
   writing `quat.csv`; `warp_pixels` compensated with the mirrored rotation, so the video looked
   right while `rcs.csv` (fed to the C++ SDF) was mirrored. Do not reintroduce a per-file

@@ -14,7 +14,6 @@ import sys
 
 import numpy as np
 
-GRID_SIDE = 11
 FRAMES_DEFAULT = 20
 
 
@@ -74,12 +73,13 @@ def sdf_to_polygon(p, poly):
     return -min_d if inside != 0 else min_d
 
 
-def boundary_indices():
-    es = GRID_SIDE - 1
-    idx = list(range(GRID_SIDE))
-    idx += [i * GRID_SIDE + es for i in range(1, es + 1)]
-    idx += [es * GRID_SIDE + j for j in range(es - 1, -1, -1)]
-    idx += [i * GRID_SIDE for i in range(es - 1, 0, -1)]
+def boundary_indices(side):
+    """Clockwise boundary of a side x side row-major grid, as GridLayout.h."""
+    es = side - 1
+    idx = list(range(side))
+    idx += [i * side + es for i in range(1, es + 1)]
+    idx += [es * side + j for j in range(es - 1, -1, -1)]
+    idx += [i * side for i in range(es - 1, 0, -1)]
     return idx
 
 
@@ -108,13 +108,20 @@ def main():
 
     rcs = np.loadtxt(locate(case, ('rcs.csv', 'DbgFile_WarpGrids_RSCFRMMid.csv')),
                      delimiter=',')[:n_frames]
-    grids = np.zeros((rcs.shape[0], GRID_SIDE * GRID_SIDE, 2))
+    # the grid side comes from the data, so a stale constant cannot silently reshape it
+    n_pts = rcs.shape[1] // 2
+    side = int(round(n_pts ** 0.5))
+    if side * side != n_pts:
+        raise ValueError(f'rcs.csv holds {n_pts} points, not a square grid')
+    if 'gridCols' in conf and int(conf['gridCols']) != side:
+        raise ValueError(f"conf says {conf['gridCols']} columns, rcs.csv has {side}")
+    grids = np.zeros((rcs.shape[0], n_pts, 2))
     grids[..., 0] = rcs[:, 0::2] * (W - 1) / 2
     grids[..., 1] = rcs[:, 1::2] * (H - 1) / 2
 
     quats = np.loadtxt(locate(case, ('quat.csv', 'DbgFile_Frame_OriginalCamOrient.csv')),
                        delimiter=',', skiprows=1)[:, 1:5]
-    bidx = boundary_indices()
+    bidx = boundary_indices(side)
     hw, hh = (W - 1) / 2, (H - 1) / 2
     corners = np.array([[-hw * (1 - crop_h), -hh * (1 - crop_v)],
                         [hw * (1 - crop_h), -hh * (1 - crop_v)],
