@@ -20,7 +20,7 @@ import advio_common as ac  # noqa: E402
 from common import warp_grid, write_conf  # noqa: E402
 
 GRID_H, GRID_V = 55, 55  # must match kGridSide in include/GridLayout.h
-MAX_FRAMES = 20000      # rows in the shared grid file; longer than any sequence, the loader stops early
+MAX_FRAMES = 24000      # rows in the shared grid file; must cover the longest sequence (advio-22: 23141)
 
 
 def write_quat_csv(path, t_frames, quat_at):

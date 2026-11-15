@@ -64,7 +64,8 @@ def main():
           f' readout={a.readout*1e3:.2f}ms f={calib["fx"]:.1f}px')
 
     mode = 'stab' if a.opt_quat else 'fix0'
-    out = a.out or os.path.join(ac.ADVIO_DIR, 'output', 'fix0',
+    # one directory per mode, so a render never has to be identified by its file name alone
+    out = a.out or os.path.join(ac.ADVIO_DIR, 'output', mode,
                                 f'{a.seq}_{mode}_{a.pose}'
                                 f'_rs{int(round(a.readout*1000))}_f{f0}-{f1}.mp4')
     os.makedirs(os.path.dirname(out), exist_ok=True)
