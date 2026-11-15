@@ -56,7 +56,7 @@ def write_rcs_csv(path, calib, quat_at, t_frames, width, height, n_rows=MAX_FRAM
 
     With readout=0 the de-RS homography is the identity, so every frame has the same grid
     (only the lens model acts, and it does not depend on time). Calling warp_grid per frame
-    would return bit-identical rows 15589 times, so the row is computed once and repeated.
+    would return bit-identical rows for every frame, so the row is computed once and repeated.
     A non-zero readout keeps the per-frame loop: rows really differ then.
     """
     if calib['readout'] == 0:
@@ -73,7 +73,7 @@ def write_rcs_csv(path, calib, quat_at, t_frames, width, height, n_rows=MAX_FRAM
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--seq', default='advio-01')
-    ap.add_argument('--pose', choices=['arkit', 'gt'], default='arkit')
+    ap.add_argument('--pose', choices=['arkit', 'gt', 'imu'], default='arkit')
     ap.add_argument('--crop', type=float, default=0.2,
                     help='cropFactor; keeps (1-crop) of each side inside the frame')
     ap.add_argument('--debug', action='store_true',

@@ -4,11 +4,11 @@ ADVIO (advio-XX) ships per-device streams under iphone/ (accelerometer.csv, gyro
 frames.csv, arkit.csv, frames.mov) plus ground-truth/pose.csv. Timestamps are seconds on
 one device clock, so no LiU-style offset repair is needed.
 
-Calibration comes from the official repo AaltoVision/ADVIO calibration/iphone-2.yaml,
-which covers sequences 1-12 (advio-01 included): pinhole intrinsics, radial-tangential
-distortion, T_cam_imu (the camera frame is the IMU frame rotated 180 deg about x) and the
-(approximate) additive IMU biases. Ground-truth poses are already CAMERA poses, so they are
-used directly, while the gyro stream must go through integrate_gyro and R_cam_imu.
+Calibration comes from the official repo (AaltoVision/ADVIO) calibration/ yaml matching
+this sequence's device batch: pinhole intrinsics, radial-tangential distortion, T_cam_imu
+(the camera frame is the IMU frame rotated 180 deg about x) and approximate IMU biases.
+ARKit and ground-truth files both store camera->world attitudes, so both are conjugated on
+import; the gyro stream instead goes through integrate_gyro and R_cam_imu.
 """
 import io
 import os
@@ -29,6 +29,8 @@ CALIB_DIR = os.path.join(ADVIO_DIR, 'calibration')
 # 1-12 -> iphone-2, 13-17 -> iphone-3, 18-19 -> iphone-1, 20-23 -> iphone-4
 BATCHES = ((1, 12, 'iphone-02.yaml'), (13, 17, 'iphone-03.yaml'),
            (18, 19, 'iphone-01.yaml'), (20, 23, 'iphone-04.yaml'))
+# the README table labels its bias rows by sequence range
+BIAS_ROWS = ((1, 12, '1-12'), (13, 17, '13-17'), (18, 19, '18-19'), (20, 23, '20-23'))
 
 # ARKit/GT store camera->world in ARKit camera axes (x right, y up, z back); video pixels
 # are x right, y down, z forward, so poses need a 180 deg roll about x before rendering.
@@ -90,9 +92,7 @@ def load_imu_bias(seq):
         return _BIAS_CACHE[name]
     # the README numbers the rows by sequence range, not by yaml file name
     n = _seq_number(seq)
-    row = next((f'{lo}-{hi}' for lo, hi, f in [(1, 12, '1-12'), (13, 17, '13-17'),
-                                              (18, 19, '18-19'), (20, 23, '20-23')]
-                if lo <= n <= hi), None)
+    row = next((label for lo, hi, label in BIAS_ROWS if lo <= n <= hi), None)
     if row is None:
         raise ValueError(f'{seq}: no bias row for sequence {n}')
     with open(os.path.join(CALIB_DIR, 'README.md')) as f:

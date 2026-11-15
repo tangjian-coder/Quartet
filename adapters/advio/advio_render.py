@@ -49,11 +49,17 @@ def main():
 
     t_frames, quat_at, n = ac.make_quat_at(a.seq, a.pose)
     W, H, n_video, fps = ac.video_info(a.seq)
+    if n != n_video:
+        # the optimizer indexes poses and frames 1:1, so a mismatch would shift the video
+        print(f'[WARN] {a.seq}: {n} pose rows vs {n_video} video frames')
     f0 = a.f0
     f1 = n_video - 1 if a.f1 is None else min(a.f1, n_video - 1)
     if not 0 <= f0 <= f1:
         ap.error(f'empty frame range: f0={f0} f1={f1} (video has {n_video} frames)')
     calib = ac.calib_for(a.seq, a.readout)
+    # readout=0 means every column shares one exposure, so de-RS has no fixed point to solve:
+    # asking for it only buys a redundant second iteration (measured 31 ms/frame)
+    use_rs = calib['readout'] != 0.0
     print(f'{a.seq}: video {W}x{H} {fps:.2f}fps {n_video} frames | pose={a.pose}'
           f' readout={a.readout*1e3:.2f}ms f={calib["fx"]:.1f}px')
 
@@ -95,9 +101,6 @@ def main():
         else:
             q_out = q_ref0
         # official ADVIO intrinsics + radtan; portrait capture means the sensor reads columns
-        # readout=0 means every column shares one exposure, so de-RS has no fixed point to
-        # solve: asking for it only buys a redundant second iteration (measured 31 ms/frame)
-        use_rs = calib['readout'] != 0.0
         mx, my = warp_pixels(calib, quat_at, t_frames[i], q_out, W, H,
                              use_rs=use_rs, row_ref='pixel_row', scan_axis=a.scan_axis,
                              ldc_type=None if a.no_dist else calib['ldc_type'])
