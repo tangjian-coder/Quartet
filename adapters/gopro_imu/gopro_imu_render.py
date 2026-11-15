@@ -1,13 +1,14 @@
 """GoPro-IMU renderer: lock-frame-0 (per-pixel) or stabilized output from optimized poses.
 
 Pipeline: output frame (q_out view) -> row pose rotation (incl. RS) -> atan distortion ->
-sample original frame, always through gopro_common.warp_pixels (single inverse-warp path):
-  default          : q_ref = frame-0 mid pose, row_ref="output_row" (legacy fix0 approximation)
-  --opt-quat file  : q_out = opt[i] (already w2c, same convention as quat_at)
-  --fix0           : q_out = frame-0 mid pose (lock frame 0), default --row-ref pixel_row
-Usage: python3 adapters/gopro_imu/gopro_imu_render.py <seq_dir> <out_dir> [--max-frames N]
-       [--out-name name] [--opt-quat opt.csv] [--fix0] [--row-ref pixel_row|output_row]
-       [--f0 N] [--f1 N] [--workers N]
+sample original frame, always through common.warp_pixels (single inverse-warp path).
+One mode must be chosen explicitly:
+  --fix0           : q_out = frame-0 mid pose. Verification: a correct pose chain / time
+                     offset / calibration holds the picture still, a wrong one drifts.
+  --opt-quat file  : q_out = opt[i] (already w2c, same convention as quat_at). Final render.
+Both modes iterate the source row (row_ref="pixel_row") so the de-RS solve is self-consistent.
+Usage: python3 adapters/gopro_imu/gopro_imu_render.py <seq_dir> <out_dir> (--fix0 | --opt-quat opt.csv)
+       [--max-frames N] [--out-name name] [--f0 N] [--f1 N] [--workers N]
   seq_dir: sequence dir (parent must contain camera_parameters.h5)
 """
 import sys
@@ -19,7 +20,7 @@ import numpy as np
 import cv2
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _HERE)  # same dir: gopro_common + gopro_imu_* modules
+sys.path.insert(0, _HERE)  # same dir: gopro_common + gopro_imu_*; common.py is one level up
 
 from gopro_common import load_gopro_calib, warp_pixels
 from gopro_imu_to_input import build_pose_chain
@@ -30,16 +31,20 @@ def main():
     max_frames = 0
     if "--max-frames" in sys.argv:
         max_frames = int(sys.argv[sys.argv.index("--max-frames") + 1])
-    out_name = "fix0_dense.mp4"
-    if "--out-name" in sys.argv:
-        out_name = sys.argv[sys.argv.index("--out-name") + 1]
     opt_quat_path = None
     if "--opt-quat" in sys.argv:
         opt_quat_path = sys.argv[sys.argv.index("--opt-quat") + 1]
     fix0 = "--fix0" in sys.argv
-    row_ref = "pixel_row"
-    if "--row-ref" in sys.argv:
-        row_ref = sys.argv[sys.argv.index("--row-ref") + 1]
+    # fix0 is a verification mode, not a default: the two modes answer different questions
+    if fix0 and opt_quat_path:
+        sys.exit("--fix0 and --opt-quat are mutually exclusive")
+    if not fix0 and not opt_quat_path:
+        sys.exit("pick a mode: --fix0 (lock frame 0, verify the pose chain) "
+                 "or --opt-quat <csv> (stabilized render)")
+    # the default file name states which question the output answers
+    out_name = "fix0_dense.mp4" if fix0 else "stab_dense.mp4"
+    if "--out-name" in sys.argv:
+        out_name = sys.argv[sys.argv.index("--out-name") + 1]
     f0 = int(sys.argv[sys.argv.index("--f0") + 1]) if "--f0" in sys.argv else 0
     f1 = int(sys.argv[sys.argv.index("--f1") + 1]) if "--f1" in sys.argv else 0
     workers = int(sys.argv[sys.argv.index("--workers") + 1]) if "--workers" in sys.argv else 0
@@ -93,8 +98,7 @@ def main():
         if not ok:
             break
         t0i = i / fps + time_offset
-        # one inverse-warp path for both modes; only the output view / row ref differs.
-        # The old default (warp_virtual) was this same map with row_ref="output_row".
+        # One inverse-warp path for both modes; only the output view differs.
         if opt_quats is not None:
             # optimizer CSV can be one row shorter than the video (e.g. playground1); hold
             # the last pose instead of aborting the whole render
@@ -105,12 +109,10 @@ def main():
                 q_out = opt_quats[-1]
             else:
                 q_out = opt_quats[i]
-            rr = row_ref
         else:
             q_out = q_ref0
-            rr = row_ref if fix0 else "output_row"
         if q_out is not None:
-            mx, my = warp_pixels(calib, quat_at, t0i, q_out, W, H, row_ref=rr, workers=workers)
+            mx, my = warp_pixels(calib, quat_at, t0i, q_out, W, H, workers=workers)
             # border fill in one pass (map is already float32)
             mx = np.nan_to_num(mx, nan=-1.0)
             my = np.nan_to_num(my, nan=-1.0)

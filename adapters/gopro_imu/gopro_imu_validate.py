@@ -13,7 +13,7 @@ import cv2
 from scipy.interpolate import griddata
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _HERE)  # same dir: gopro_common + gopro_imu_* modules
+sys.path.insert(0, _HERE)  # same dir: gopro_common + gopro_imu_*; common.py is one level up
 
 import numpy as np
 
@@ -54,9 +54,9 @@ def forward_warp(src, calib, quat_at, t0, q_mid, use_rs=True, ldc_type="fisheye"
            241x241 reference remap (frame 560): 11x11 p99=11.8 px, 31x31 p99=1.15 px, 55x55 p99=0.36 px,
            so 31 is NOT converged; keep the adapter density.
     use_rs=False / ldc_type=None isolate LDC / RS; q_ref overrides the reference (default q_mid).
-    Correction grid comes from the shared gopro_common.warp_grid (single implementation,
+    Correction grid comes from the shared common.warp_grid (single implementation,
     same chain to_input uses for rcs.csv).
-    Counterpart of gopro_common.warp_pixels, which applies the same correction inversely per output pixel.
+    Counterpart of common.warp_pixels, which applies the same correction inversely per output pixel.
     """
     q_to = q_ref if q_ref is not None else q_mid
 
@@ -109,9 +109,9 @@ def main():
 
     # all three use forward_warp (real-K window): ldc/rsc isolate LDC / RS by toggles,
     # so the quadrants share one geometry and are directly comparable
-    full = forward_warp(src, calib, quat_at, t0, q_mid, True, True)
-    ldc = forward_warp(src, calib, quat_at, t0, q_mid, False, True)
-    rsc = forward_warp(src, calib, quat_at, t0, q_mid, True, False)
+    full = forward_warp(src, calib, quat_at, t0, q_mid, True, calib["ldc_type"])
+    ldc = forward_warp(src, calib, quat_at, t0, q_mid, False, calib["ldc_type"])
+    rsc = forward_warp(src, calib, quat_at, t0, q_mid, True, None)
 
     import matplotlib.pyplot as plt
     titles = ["Original (distorted+RS)", "LDC only (undistorted)", "RSC only (de-RS)", "LDC+RSC (full)"]

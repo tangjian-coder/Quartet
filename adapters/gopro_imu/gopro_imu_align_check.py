@@ -17,7 +17,7 @@ import numpy as np
 import cv2
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _HERE)  # same dir: gopro_common + gopro_imu_* modules
+sys.path.insert(0, _HERE)  # same dir: gopro_common + gopro_imu_*; common.py is one level up
 
 from gopro_common import quat_mul, quat_conj, load_gopro_calib, warp_pixels
 from gopro_imu_to_input import build_pose_chain
@@ -69,8 +69,8 @@ def main():
         t2 = (i + 1) / fps + time_offset + prev_off
         q1 = quat_at(t1 + calib["readout"] / 2)
         q2 = quat_at(t2 + calib["readout"] / 2)
-        # Same map the renderer uses, locked to each frame's own mid pose (row_ref="output_row"
-        # is the legacy single-pass variant; the render default for this mode is identical)
+        # Locked to each frame's own mid pose. Single-pass on purpose: this check only needs
+        # rough alignment, so the pixel_row iteration is skipped and the map differs slightly
         w1 = _warp_img(f1, calib, quat_at, t1, q1, W, H)
         w2 = _warp_img(f2, calib, quat_at, t2, q2, W, H)
         g1 = cv2.cvtColor(w1, cv2.COLOR_BGR2GRAY)

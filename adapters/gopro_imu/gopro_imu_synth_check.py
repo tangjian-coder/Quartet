@@ -13,7 +13,7 @@ import os
 import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _HERE)  # same dir: gopro_common + gopro_imu_* modules
+sys.path.insert(0, _HERE)  # same dir: gopro_common + gopro_imu_*; common.py is one level up
 
 from gopro_common import quat_mul, quat_conj, quat_to_R, load_gopro_calib
 from gopro_imu_to_input import build_pose_chain
@@ -39,7 +39,7 @@ def make_grid_image(W, H):
 
 def sim_warp(src, calib, quat_at, t0, q_mid, use_rs=True, use_ldc=True, direction="fwd"):
     """Bidirectional warp for simulation only (local copy, do NOT confuse with
-    gopro_common.warp_pixels / gopro_imu_validate.forward_warp): direction selects simulate vs recover
+    common.warp_pixels / gopro_imu_validate.forward_warp): direction selects simulate vs recover
 
     Both directions use the real K on the ideal (corrected) frame, so the pair stays
     inverse to each other and matches the production chain's coordinate domain.
