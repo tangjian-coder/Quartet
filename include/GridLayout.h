@@ -5,9 +5,10 @@
 #include <vector>
 
 /* Shared RCS grid layout: the optimizer derives its boundary polygon from the
- * constant below, so the loader must validate conf against the same value. */
+ * constant below, so the loader must validate conf against the same value.
+ * Must match gopro_imu_to_input.GRID_H/GRID_V. */
 
-constexpr int kGridSide = 11;        // RCS grid is kGridSide x kGridSide
+constexpr int kGridSide = 55;        // RCS grid is kGridSide x kGridSide
 constexpr int kEdgeSegs = kGridSide - 1;
 
 // Boundary indices for a kGridSide x kGridSide row-major RCS grid (4*kEdgeSegs
