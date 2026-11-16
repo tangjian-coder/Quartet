@@ -13,7 +13,8 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-from common import quat_mul, quat_mul_many, rotvec_to_quat, rotvec_to_quat_many  # noqa: E402
+from common import (quat_mul, quat_mul_many, rotvec_to_quat, rotvec_to_quat_many,
+                    slerp, slerp_many)  # noqa: E402
 
 DVS_DIR = os.environ.get('DVS_DIR',
                          os.path.expanduser('~/data/DeepFVS/dataset_release'))
@@ -98,6 +99,20 @@ def integrate_gyro(gyro):
     return t, q
 
 
+def _ois_track(d):
+    """OIS log as a strictly increasing (time_s, xy) track.
+
+    The log re-emits the previous frame's tail samples at every frame boundary, so the raw
+    clock goes backwards; sorting and dropping duplicate stamps makes interpolation valid.
+    """
+    o = np.asarray(d['ois'], dtype=float)
+    t = o[:, 2] * 1e-9
+    order = np.argsort(t, kind='stable')
+    t, xy = t[order], o[order, :2]
+    keep = np.concatenate([[True], np.diff(t) > 1e-9])
+    return t[keep], xy[keep]
+
+
 def make_quat_at(seq, ois_scale=1.0, exp_offset=0.0, use_ois=True, f_scale=1.0):
     """Return (t_frame, quat_at, info) with our pipeline convention (w,x,y,z, w2c).
 
@@ -110,36 +125,40 @@ def make_quat_at(seq, ois_scale=1.0, exp_offset=0.0, use_ois=True, f_scale=1.0):
     # fov is the only intrinsic DVS ships, so a scale knob absorbs its calibration error
     info['f'] = info['f'] * f_scale
     gt, qg = integrate_gyro(d['gyro'])
-    # OIS log carries ns; store it in seconds so every lookup matches the pose clock
-    ois = d['ois'].copy()
-    ois[:, 2] *= 1e-9
+    t_ois, xy_ois = _ois_track(d)
     f = info['f']
     W, H = info['W'], info['H']
 
-    def _ois_quat(o):
-        dx = o[0] / ACTIVE_W * W * ois_scale
-        dy = o[1] / ACTIVE_H * H * ois_scale
+    def _ois_quat(ox, oy):
+        dx = ox / ACTIVE_W * W * ois_scale
+        dy = oy / ACTIVE_H * H * ois_scale
         return rotvec_to_quat(np.array([-dy / f, dx / f, 0.0]))
 
     def _quat(t):
-        i = min(np.searchsorted(gt, t), len(gt) - 1)
-        q = qg[i].copy()
+        # gyro runs at ~200 Hz while one frame's rows span several samples, so the pose has
+        # to be interpolated; holding the previous sample bends rows into visible steps.
+        i = int(np.clip(np.searchsorted(gt, t) - 1, 0, len(gt) - 2))
+        span = gt[i + 1] - gt[i]
+        a = 0.0 if span <= 0 else float(np.clip((t - gt[i]) / span, 0.0, 1.0))
+        q = slerp(qg[i], qg[i + 1], a)
         if use_ois:
-            j = min(np.searchsorted(ois[:, 2], t + exp_offset), len(ois) - 1)
-            q = quat_mul(_ois_quat(ois[j, :2]), q)
+            q = quat_mul(_ois_quat(np.interp(t + exp_offset, t_ois, xy_ois[:, 0]),
+                                   np.interp(t + exp_offset, t_ois, xy_ois[:, 1])), q)
             q = q / np.linalg.norm(q)
         return q
 
     def _many(tts):
         """Same result for a whole row/column of times, without the per-time loop."""
         tts = np.asarray(tts, dtype=float)
-        idx = np.clip(np.searchsorted(gt, tts), 0, len(gt) - 1)
-        q = qg[idx].copy()
+        idx = np.clip(np.searchsorted(gt, tts) - 1, 0, len(gt) - 2)
+        span = gt[idx + 1] - gt[idx]
+        a = np.where(span > 0,
+                     np.clip((tts - gt[idx]) / np.where(span > 0, span, 1.0), 0.0, 1.0), 0.0)
+        q = slerp_many(qg[idx], qg[idx + 1], a)
         if use_ois:
-            j = np.clip(np.searchsorted(ois[:, 2], tts + exp_offset), 0, len(ois) - 1)
-            o = ois[j, :2]
-            dx = o[:, 0] / ACTIVE_W * W * ois_scale
-            dy = o[:, 1] / ACTIVE_H * H * ois_scale
+            tt = tts + exp_offset
+            dx = np.interp(tt, t_ois, xy_ois[:, 0]) / ACTIVE_W * W * ois_scale
+            dy = np.interp(tt, t_ois, xy_ois[:, 1]) / ACTIVE_H * H * ois_scale
             rv = np.stack([-dy / f, dx / f, np.zeros(len(tts))], axis=1)
             q = quat_mul_many(rotvec_to_quat_many(rv), q)
             q = q / np.linalg.norm(q, axis=1, keepdims=True)
@@ -158,21 +177,20 @@ def ois_at(seq, ois_scale=1.0, exp_offset=0.0):
     """
     d = load_clip(seq)
     info = frame_info(d)
-    ois = d['ois'].copy()
-    ois[:, 2] *= 1e-9
+    # The shift is continuous at ~200 Hz while one frame's rows span ~3 samples, so
+    # interpolating removes the row-band steps that zero-order holding produced.
+    t_ois, xy_ois = _ois_track(d)
     W, H = info['W'], info['H']
+    sx, sy = W * ois_scale / ACTIVE_W, H * ois_scale / ACTIVE_H
 
     def _ois(t):
-        j = min(np.searchsorted(ois[:, 2], t + exp_offset), len(ois) - 1)
-        return np.array([ois[j, 0] / ACTIVE_W * W * ois_scale,
-                         ois[j, 1] / ACTIVE_H * H * ois_scale])
+        return np.array([np.interp(t + exp_offset, t_ois, xy_ois[:, 0]) * sx,
+                         np.interp(t + exp_offset, t_ois, xy_ois[:, 1]) * sy])
 
     def _many(tts):
-        tts = np.asarray(tts, dtype=float)
-        j = np.clip(np.searchsorted(ois[:, 2], tts + exp_offset), 0, len(ois) - 1)
-        o = ois[j, :2]
-        return np.stack([o[:, 0] / ACTIVE_W * W * ois_scale,
-                         o[:, 1] / ACTIVE_H * H * ois_scale], axis=1)
+        tt = np.asarray(tts, dtype=float) + exp_offset
+        return np.stack([np.interp(tt, t_ois, xy_ois[:, 0]) * sx,
+                         np.interp(tt, t_ois, xy_ois[:, 1]) * sy], axis=1)
 
     _ois.many = _many
     return _ois

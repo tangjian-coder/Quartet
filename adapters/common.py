@@ -38,6 +38,28 @@ def slerp(q0, q1, a):
     return q / np.linalg.norm(q)
 
 
+def slerp_many(q0, q1, a):
+    """Spherical interpolation for arrays of unit quaternions (w,x,y,z) and fractions a.
+
+    Sign-flips q1 onto the short arc per row, then blends linearly or spherically; this is
+    the batched form of slerp and is what a timestamp lookup with sub-sample offsets needs.
+    """
+    d = np.sum(q0 * q1, axis=1)
+    q1 = np.where((d < 0.0)[:, None], -q1, q1)
+    d = np.abs(np.clip(d, -1.0, 1.0))
+    out = np.empty_like(q0)
+    lin = d > SLERP_LIN_D
+    if lin.any():
+        f = a[lin][:, None]
+        out[lin] = q0[lin] + f * (q1[lin] - q0[lin])
+    if (~lin).any():
+        th = np.arccos(d[~lin])[:, None]
+        f = a[~lin][:, None]
+        out[~lin] = (np.sin((1.0 - f) * th) * q0[~lin]
+                     + np.sin(f * th) * q1[~lin]) / np.sin(th)
+    return out / np.linalg.norm(out, axis=1, keepdims=True)
+
+
 def R_to_quat(R):
     """Rotation matrix to (w,x,y,z) quaternion."""
     tr = R[0, 0] + R[1, 1] + R[2, 2]
