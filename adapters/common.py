@@ -75,6 +75,42 @@ def rotvec_to_R(v):
     return axis_angle_to_R(v)
 
 
+def rotvec_to_quat(v):
+    """Rotation vector (axis * angle) to quaternion (w,x,y,z)."""
+    ang = np.linalg.norm(v)
+    if ang < 1e-12:
+        return np.array([1.0, 0.0, 0.0, 0.0])
+    ax = v / ang
+    h = ang / 2.0
+    s = np.sin(h)
+    return np.array([np.cos(h), ax[0] * s, ax[1] * s, ax[2] * s])
+
+
+def rotvec_to_quat_many(v):
+    """Batch rotvec_to_quat for (n,3) rotation vectors."""
+    ang = np.linalg.norm(v, axis=1)
+    zero = ang < 1e-12
+    safe = np.where(zero, 1.0, ang)
+    ax = v / safe[:, None]
+    h = ang / 2.0
+    s = np.sin(h)
+    q = np.empty((len(v), 4), dtype=v.dtype)
+    q[:, 0] = np.cos(h)
+    q[:, 1:] = ax * s[:, None]
+    q[zero] = (1.0, 0.0, 0.0, 0.0)
+    return q
+
+
+def quat_mul_many(a, b):
+    """Batch Hamilton product for (n,4) quaternions (w,x,y,z)."""
+    aw, ax, ay, az = a[:, 0], a[:, 1], a[:, 2], a[:, 3]
+    bw, bx, by, bz = b[:, 0], b[:, 1], b[:, 2], b[:, 3]
+    return np.stack([aw * bw - ax * bx - ay * by - az * bz,
+                     aw * bx + ax * bw + ay * bz - az * by,
+                     aw * by - ax * bz + ay * bw + az * bx,
+                     aw * bz + ax * by - ay * bx + az * bw], axis=1)
+
+
 def quat_mul(a, b):
     """Hamilton product, (w,x,y,z)"""
     w1, x1, y1, z1 = a
@@ -213,7 +249,7 @@ def row_time(t0, readout, s, n, ref="pixel_row"):
 
 
 def warp_grid(calib, quat_at, t0, q_to, frame_w, frame_h, gh=31, gv=31,
-              use_rs=True, ldc_type="fisheye"):
+              use_rs=True, ldc_type="fisheye", ois_fn=None):
     """LDC + de-RS correction of a regular source-frame grid, real K throughout.
 
     Grid points are source-frame pixels (top-left origin, linspace 0..W-1 / H-1); each
@@ -227,21 +263,33 @@ def warp_grid(calib, quat_at, t0, q_to, frame_w, frame_h, gh=31, gv=31,
     ldc_type selects the lens-distortion-correction model: "fisheye" (atan/equidistant,
     lgamma+wc), "radtan" (OpenCV k1,k2,p1,p2) or None to keep the raw grid. This is the
     forward chain, so the model runs in the "remove distortion" direction.
+
+    ois_fn(t) -> (dx, dy) in output pixels adds the optical-image-stabilisation shift: it is
+    a physical lens shift, so it is stripped from the source before LDC. The target view is a
+    virtual stabilised view with no OIS of its own, so nothing is re-applied there.
+    None (default) leaves the chain untouched.
     """
     fx, fy, cx, cy = calib["fx"], calib["fy"], calib["cx"], calib["cy"]
-    lgamma, wc = calib["lgamma"], np.asarray(calib["wc"])
     readout = calib["readout"]
 
     x = np.linspace(0, frame_w - 1, gh, dtype=np.float32)
     y = np.linspace(0, frame_h - 1, gv, dtype=np.float32)
     grid = np.stack(np.meshgrid(x, y), axis=-1)
 
+    if ois_fn is not None:
+        # source rows carry their own OIS shift; strip it before the lens model, which
+        # is where a lens shift physically happens
+        for j in range(gv):
+            dx, dy = ois_fn(row_time(t0, readout, j, gv, ref="grid_node"))
+            grid[j, :, 0] -= dx
+            grid[j, :, 1] -= dy
+
     if ldc_type is not None:
         # Unproject with real K (no virtual-camera assumption), then undistort
         xn = (grid[..., 0] - cx) / fx
         yn = (grid[..., 1] - cy) / fy
         if ldc_type == "fisheye":
-            xu, yu = fisheye_undistort(xn, yn, wc, lgamma)
+            xu, yu = fisheye_undistort(xn, yn, np.asarray(calib["wc"]), calib["lgamma"])
         elif ldc_type == "radtan":
             xu, yu = radtan_undistort(xn, yn, calib["radtan"])
         else:
@@ -261,6 +309,7 @@ def warp_grid(calib, quat_at, t0, q_to, frame_w, frame_h, gh=31, gv=31,
             xy1 = np.concatenate([grid[j], np.ones((gh, 1), dtype=np.float32)], axis=-1)
             warped = (H @ xy1.T).T
             grid[j] = warped[..., :2] / warped[..., 2:3]
+
     return grid
 
 
@@ -285,7 +334,7 @@ def _dispatch(blocks, fn, workers):
 
 def warp_pixels(calib, quat_at, t0, q_out, frame_w, frame_h, use_rs=True,
                 row_ref="pixel_row", max_iter=3, tol=0.01, chunk=MAP_CHUNK, workers=0,
-                undistort=None, scan_axis="row", ldc_type="fisheye"):
+                undistort=None, scan_axis="row", ldc_type="fisheye", ois_fn=None):
     """Inverse per-pixel mapping for rendering: output pixels -> source pixels (gather).
 
     Real K throughout. De-RS applies the INVERSE of the forward correction: the ray of an
@@ -312,8 +361,10 @@ def warp_pixels(calib, quat_at, t0, q_out, frame_w, frame_h, use_rs=True,
         raise TypeError("quat_at must expose .many(times) (use make_quat_at, or add a "
                         "vectorised sibling to your sampler)")
     fx, fy, cx, cy = calib["fx"], calib["fy"], calib["cx"], calib["cy"]
-    lgamma, wc = calib["lgamma"], np.asarray(calib["wc"])
     readout = calib["readout"]
+
+    # Optical stabilisation is a lens shift, so it enters as a translation on the source
+    # side only: the output is a virtual stabilised view and has no OIS of its own.
 
     # float32 halves the memory traffic of the per-pixel einsum (measured 6x faster)
     map_x = np.full((frame_h, frame_w), np.nan, np.float32)
@@ -325,7 +376,7 @@ def warp_pixels(calib, quat_at, t0, q_out, frame_w, frame_h, use_rs=True,
         if ldc_type is None:
             return xu, yu
         if ldc_type == "fisheye":
-            return fisheye_distort(xu, yu, wc, lgamma)
+            return fisheye_distort(xu, yu, np.asarray(calib["wc"]), calib["lgamma"])
         if ldc_type == "radtan":
             return radtan_distort(xu, yu, calib["radtan"])
         raise ValueError(f"unknown ldc_type: {ldc_type}")
@@ -333,6 +384,12 @@ def warp_pixels(calib, quat_at, t0, q_out, frame_w, frame_h, use_rs=True,
     # Per-source-row poses: one scalar interpolation per row, shared by every pixel.
     scan_n = frame_h if scan_axis == "row" else frame_w
     scan_times = [row_time(t0, readout, s, scan_n, ref="pixel_row") for s in range(scan_n)]
+    if ois_fn is None:
+        ois_scan = None
+    elif hasattr(ois_fn, "many"):
+        ois_scan = np.asarray(ois_fn.many(np.asarray(scan_times)), dtype=np.float32)
+    else:
+        ois_scan = np.array([ois_fn(t) for t in scan_times], dtype=np.float32)
     # Gather map: forward is R(view)*R(row)^T, so the gather is R(row)*R(view)^T with the
     # row pose taken at that source row's exposure time.
     rows = quat_at.many(np.asarray(scan_times)).astype(np.float32)
@@ -363,6 +420,9 @@ def warp_pixels(calib, quat_at, t0, q_out, frame_w, frame_h, use_rs=True,
             y0, y1 = span
             yy, xx = np.meshgrid(np.arange(y0, y1, dtype=np.float32), xs, indexing="ij")
             ray = np.stack([(xx - cx) / fx, (yy - cy) / fy, np.ones_like(xx)], axis=-1)
+            if ois_scan is not None:
+                ox = ois_scan[y0:y1, 0][:, None]
+                oy = ois_scan[y0:y1, 1][:, None]
             sy = yy.copy()          # the output row is the initial source-row guess
             sx = xx
             for _ in range(iters):
@@ -376,7 +436,10 @@ def warp_pixels(calib, quat_at, t0, q_out, frame_w, frame_h, use_rs=True,
                 vz = c[..., 6] * ray[..., 0] + c[..., 7] * ray[..., 1] + c[..., 8]
                 xu, yu = vx / vz, vy / vz
                 xd, yd = _apply_dist(xu, yu)
-                sx, sy_new = fx * xd + cx, fy * yd + cy
+                if ois_scan is not None:
+                    sx, sy_new = fx * xd + cx + ox, fy * yd + cy + oy
+                else:
+                    sx, sy_new = fx * xd + cx, fy * yd + cy
                 # always take the new guess so a single pass is a valid (non-RS) mapping
                 converged = np.max(np.abs(sy_new - sy)) < tol
                 sy = sy_new
@@ -395,6 +458,9 @@ def warp_pixels(calib, quat_at, t0, q_out, frame_w, frame_h, use_rs=True,
             x0, x1 = span
             yy, xx = np.meshgrid(ys, np.arange(x0, x1, dtype=np.float32), indexing="ij")
             ray = np.stack([(xx - cx) / fx, (yy - cy) / fy, np.ones_like(xx)], axis=-1)
+            if ois_scan is not None:
+                ox = ois_scan[x0:x1, 0][None, :]
+                oy = ois_scan[x0:x1, 1][None, :]
             sx = xx          # the output column is the initial source-column guess
             sy = yy.copy()
             for _ in range(iters):
@@ -408,7 +474,10 @@ def warp_pixels(calib, quat_at, t0, q_out, frame_w, frame_h, use_rs=True,
                 vz = c[..., 6] * ray[..., 0] + c[..., 7] * ray[..., 1] + c[..., 8]
                 xu, yu = vx / vz, vy / vz
                 xd, yd = _apply_dist(xu, yu)
-                sx_new, sy = fx * xd + cx, fy * yd + cy
+                if ois_scan is not None:
+                    sx_new, sy = fx * xd + cx + ox, fy * yd + cy + oy
+                else:
+                    sx_new, sy = fx * xd + cx, fy * yd + cy
                 # always take the new guess so a single pass is a valid (non-RS) mapping
                 converged = np.max(np.abs(sx_new - sx)) < tol
                 sx = sx_new
