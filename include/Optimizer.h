@@ -38,6 +38,7 @@ public:
               const Eigen::Matrix3d& K,
               int width, int height,
               double crop_factor_h, double crop_factor_v,
+              int grid_cols, int grid_rows,
               const SolverConfig& config = SolverConfig());
 
     std::vector<Eigen::Quaterniond> solveWindowGN(const std::vector<Eigen::Quaterniond>& fixed_prefix_filtered = {});
@@ -51,6 +52,9 @@ private:
     int height;
     double crop_factor_h;
     double crop_factor_v;
+    // RCS grid size, per dataset: drives the boundary polygon resolution
+    int grid_cols_;
+    int grid_rows_;
     SolverConfig config_;
 
     size_t prefix_ = 0;

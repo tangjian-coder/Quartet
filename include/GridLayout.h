@@ -1,31 +1,32 @@
 #ifndef GRID_LAYOUT_H
 #define GRID_LAYOUT_H
 
+#include <array>
 #include <cstddef>
 #include <vector>
 
-/* Shared RCS grid layout: the optimizer derives its boundary polygon from the
- * constant below, so the loader must validate conf against the same value.
- * Must match gopro_imu_to_input.GRID_H/GRID_V. */
+/* RCS grid layout helpers.
+ *
+ * The grid size is per-dataset (GoPro keeps 55x55 because its fisheye boundary is
+ * strongly curved, ADVIO/DVS use 11x11), so it arrives at runtime through conf.yaml
+ * and the loader validates the point count against it. */
 
-constexpr int kGridSide = 55;        // RCS grid is kGridSide x kGridSide
-constexpr int kEdgeSegs = kGridSide - 1;
-
-// Boundary indices for a kGridSide x kGridSide row-major RCS grid (4*kEdgeSegs
-// outer points, walked clockwise from the top-left corner).
-inline const std::vector<size_t>& getBoundaryIndices() {
-    static const std::vector<size_t> idx = []() {
-        std::vector<size_t> v;
-        for (int j = 0; j < kGridSide; ++j) v.push_back(j);
-        for (int i = 1; i <= kEdgeSegs; ++i) v.push_back(i * kGridSide + kEdgeSegs);
-        for (int j = kEdgeSegs - 1; j >= 0; --j) v.push_back(kEdgeSegs * kGridSide + j);
-        for (int i = kEdgeSegs - 1; i > 0; --i) v.push_back(i * kGridSide);
-        return v;
-    }();
-    return idx;
+// Boundary indices for a cols x rows row-major RCS grid, walked clockwise from
+// the top-left corner. 2*(cols+rows)-4 points for cols,rows >= 2.
+inline std::vector<size_t> boundaryIndices(int cols, int rows) {
+    std::vector<size_t> v;
+    v.reserve(static_cast<size_t>(2 * (cols + rows)));
+    for (int j = 0; j < cols; ++j) v.push_back(static_cast<size_t>(j));
+    for (int i = 1; i < rows; ++i) v.push_back(static_cast<size_t>(i) * cols + (cols - 1));
+    for (int j = cols - 2; j >= 0; --j) v.push_back(static_cast<size_t>(rows - 1) * cols + j);
+    for (int i = rows - 2; i > 0; --i) v.push_back(static_cast<size_t>(i) * cols);
+    return v;
 }
 
-/* TODO: generalizing to arbitrary grid dims requires boundary indexing by
- * (cols, rows) plus an Optimizer that receives those dims explicitly. */
+// Number of segments along each boundary side, in the order the walk visits them:
+// top (cols-1), right (rows-1), bottom (cols-1), left (rows-1).
+inline std::array<int, 4> boundaryEdgeSegs(int cols, int rows) {
+    return {cols - 1, rows - 1, cols - 1, rows - 1};
+}
 
 #endif // GRID_LAYOUT_H

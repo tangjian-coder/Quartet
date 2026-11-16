@@ -90,6 +90,7 @@ Optimizer::Optimizer(const std::vector<FrameData>& all_frames,
                      const Eigen::Matrix3d& K,
                      int width, int height,
                      double crop_factor_h, double crop_factor_v,
+                     int grid_cols, int grid_rows,
                      const SolverConfig& config)
     : all_frames_(&all_frames),
       window_indices_(std::move(window_indices)),
@@ -99,6 +100,8 @@ Optimizer::Optimizer(const std::vector<FrameData>& all_frames,
       height(height),
       crop_factor_h(crop_factor_h),
       crop_factor_v(crop_factor_v),
+      grid_cols_(grid_cols),
+      grid_rows_(grid_rows),
       config_(config) {
 }
 
@@ -110,7 +113,8 @@ void Optimizer::precomputeBoundary(size_t prefix) {
     prefix_ = prefix;
     N_ = window_indices_.size();
 
-    const auto& bidx = getBoundaryIndices();
+    const std::vector<size_t> bidx = boundaryIndices(grid_cols_, grid_rows_);
+    const std::array<int, 4> segs = boundaryEdgeSegs(grid_cols_, grid_rows_);
     fixed_boundary_.resize(N_);
     for (size_t i = 0; i < N_; ++i) {
         fixed_boundary_[i].clear();
@@ -126,19 +130,21 @@ void Optimizer::precomputeBoundary(size_t prefix) {
     static constexpr double kSafeMargin = 50.0;   // px
     coarse_edges_.resize(N_);
     for (size_t i = 0; i < N_; ++i) {
-        const auto& bnd = fixed_boundary_[i];   // 40 pts, 4 fine edges of 10 segs
+        const auto& bnd = fixed_boundary_[i];   // 2*(cols+rows)-4 boundary points
+        size_t off = 0;                         // walk offset of the current side
         for (int e = 0; e < 4; ++e) {
-            const Eigen::Vector2d& p0 = bnd[e * kEdgeSegs];
-            const Eigen::Vector2d& p1 = bnd[(e + 1) * kEdgeSegs % (4 * kEdgeSegs)];
+            const Eigen::Vector2d& p0 = bnd[off];
+            const Eigen::Vector2d& p1 = bnd[(off + static_cast<size_t>(segs[e])) % bnd.size()];
             Eigen::Vector2d dir = p1 - p0;
             // Pixel coords are y-down; for this winding the left normal points inward.
             Eigen::Vector2d n_in(-dir.y(), dir.x());
             n_in.normalize();
             // Only inward bulge needs covering (it shrinks the polygon).
             double bulge = 0.0;
-            for (int k = e * kEdgeSegs + 1; k < (e + 1) * kEdgeSegs; ++k)
-                bulge = std::max(bulge, n_in.dot(bnd[k] - p0));   // +n_in = inward
+            for (int k = 1; k < segs[e]; ++k)
+                bulge = std::max(bulge, n_in.dot(bnd[off + static_cast<size_t>(k)] - p0));
             coarse_edges_[i][e] = {p0, n_in, bulge + kSafeMargin};
+            off += static_cast<size_t>(segs[e]);
         }
     }
 
@@ -540,7 +546,7 @@ double Optimizer::evaluateObjective(const std::vector<Eigen::Quaterniond>& q_sta
 void Optimizer::verifyConstraints(const std::vector<Eigen::Quaterniond>& q_state) {
     int viol_count = 0;
     double max_sdf_all = -kBigNum, min_sdf_all = kBigNum;
-    const auto& boundary = getBoundaryIndices();
+    const std::vector<size_t> boundary = boundaryIndices(grid_cols_, grid_rows_);
 
     // Violations must exceed a physical tolerance: ALM converges to g ~ 0 from
     // the infeasible side, leaving sub-pixel noise between the two warp paths.

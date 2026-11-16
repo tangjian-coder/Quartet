@@ -207,6 +207,8 @@ int main(int argc, char** argv) {
                             loader.height,
                             loader.crop_factor_h,
                             loader.crop_factor_v,
+                            loader.grid_cols,
+                            loader.grid_rows,
                             solver_config);
 
         std::cout << "Window #" << (window_index + 1) << std::endl;

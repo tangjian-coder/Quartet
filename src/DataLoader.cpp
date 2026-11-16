@@ -132,8 +132,8 @@ bool DataLoader::loadYamlData() {
 
         crop_factor_h = read_double("cropFactorH", "gridFrmCropFctrH", 0.0);
         crop_factor_v = read_double("cropFactorV", "gridFrmCropFctrV", 0.0);
-        grid_cols = static_cast<int>(read_double("gridCols", "gridCntH", kGridSide));
-        grid_rows = static_cast<int>(read_double("gridRows", "gridCntV", kGridSide));
+        grid_cols = static_cast<int>(read_double("gridCols", "gridCntH", 0));
+        grid_rows = static_cast<int>(read_double("gridRows", "gridCntV", 0));
 
         // Log loaded parameters for verification
         std::cout << "Loaded YAML parameters:" << std::endl;
@@ -193,12 +193,11 @@ bool DataLoader::loadRcsGridData() {
     
     if (!frame_data.empty()) {
         size_t expected = frame_data[0].rcs_grid.size();
-        /* The optimizer boundary indexing is hardcoded to kGridSide, so a mismatch
-         * must fail here instead of silently degrading the constraint polygon. */
-        if (grid_cols != kGridSide || grid_rows != kGridSide) {
-            std::cerr << "ERROR: conf declares a " << grid_cols << " x " << grid_rows
-                      << " RCS grid, but the optimizer expects " << kGridSide << " x " << kGridSide
-                      << std::endl;
+        /* The grid size is per dataset, so the only invariant is that conf and the
+         * file agree; the optimizer builds its boundary from these two numbers. */
+        if (grid_cols < 2 || grid_rows < 2) {
+            std::cerr << "ERROR: RCS grid must be at least 2 x 2, conf declares "
+                      << grid_cols << " x " << grid_rows << std::endl;
             return false;
         }
         const size_t configured = static_cast<size_t>(grid_cols) * static_cast<size_t>(grid_rows);
