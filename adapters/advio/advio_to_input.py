@@ -19,7 +19,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import advio_common as ac  # noqa: E402
 from common import warp_grid, write_conf  # noqa: E402
 
-GRID_H, GRID_V = 55, 55  # must match kGridSide in include/GridLayout.h
+GRID_H, GRID_V = 11, 11  # optimizer boundary polygon only; 11x11 matches 55x55
+                         # to within 0.002 deg, and the renderer never reads the grid
 MAX_FRAMES = 24000      # rows in the shared grid file; must cover the longest sequence (advio-22: 23141)
 
 

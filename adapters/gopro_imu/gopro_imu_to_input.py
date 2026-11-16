@@ -32,7 +32,8 @@ CALIB = dict(fx=868.10363082, fy=881.57627866, cx=987.87297848, cy=529.7808111,
              readout=0.0316698, fps=29.97, size=(1920, 1080))
 # Grid density: 55x55 control points. The C++ optimizer's kGridSide (GridLayout.h)
 # must match this value; denser grids cut the griddata render error quadratically.
-GRID_H, GRID_V = 55, 55
+GRID_H, GRID_V = 55, 55  # fisheye boundary is strongly curved, so keep it dense;
+                         # the optimizer only needs the boundary polygon, not the full grid
 
 
 def probe_video(video_path):

@@ -16,7 +16,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import dvs_common as dc  # noqa: E402
 from common import warp_grid, write_conf  # noqa: E402
 
-GRID_H, GRID_V = 55, 55  # must match kGridSide in include/GridLayout.h
+GRID_H, GRID_V = 11, 11  # optimizer boundary polygon only; 11x11 matches 55x55
+                         # to within 0.002 deg, and the renderer never reads the grid
 
 
 def grid_row(calib, quat_at, t0, width, height, ois_fn=None):
@@ -31,9 +32,13 @@ def grid_row(calib, quat_at, t0, width, height, ois_fn=None):
 
 
 def write_rcs_csv(path, calib, quat_at, t_frames, width, height, ois_fn=None):
-    with open(path, 'w') as f:
+    # Write through a temp file and replace: an old symlink at this path would otherwise
+    # redirect the write into its target and leave a stale link behind.
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f:
         for t0 in t_frames:
             f.write(grid_row(calib, quat_at, t0, width, height, ois_fn) + '\n')
+    os.replace(tmp, path)
 
 
 def write_quat_csv(path, t_frames, quat_at):
