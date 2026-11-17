@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Plot single comparison of original and filtered quaternion paths.
+Plot a single comparison of the original and optimized quaternion paths.
 Only output one figure with four subplots (w, x, y, z).
 """
 
@@ -12,9 +12,18 @@ import argparse
 import matplotlib.ticker as ticker
 from pathlib import Path
 
+# One place for every font size in the figure
+plt.rcParams.update({
+    'font.size': 15,
+    'axes.labelsize': 12,
+    'xtick.labelsize': 15,
+    'ytick.labelsize': 15,
+    'legend.fontsize': 15,
+})
 
-def load_quaternion_data(original_path, optimized_path, filtered_path=None):
-    """Load original, optimized and (optionally) product-filtered quaternions."""
+
+def load_quaternion_data(original_path, optimized_path):
+    """Load the original and optimized quaternion series."""
     print(f"Loading original quaternions from: {original_path}")
     print(f"Loading optimized quaternions from: {optimized_path}")
 
@@ -66,19 +75,39 @@ def load_quaternion_data(original_path, optimized_path, filtered_path=None):
             'frames': len(optimized_w)
         }
     }
-    if filtered_path is not None:
-        print(f"Loading filtered quaternions from: {filtered_path}")
-        filtered_df = pd.read_csv(filtered_path)
-        result['filtered'] = {
-            'w': filtered_df['w'].values,
-            'x': filtered_df['x'].values,
-            'y': filtered_df['y'].values,
-            'z': filtered_df['z'].values,
-            'frames': len(filtered_df),
-        }
     return result
 
-def plot_quaternion_comparison(data, save_path, png_name='quaternion_comparison.png', fps=30):
+def clip_window(data, start_s, dur_s):
+    """Keep only one window of the series, rebased so the window starts at t=0.
+
+    Optimized rows are frame-aligned with the original, so one index mask serves both.
+    Output timestamps stay in nanoseconds for the 1 s locator.
+    """
+    # Every adapter writes the time column as integer nanoseconds
+    T = data['original']['T']
+    t_sec = (T - T[0]) * 1e-9
+    total = float(t_sec[-1])
+    if not dur_s or dur_s > total:
+        dur_s = total
+    start = float(start_s) if start_s is not None else max(0.0, (total - dur_s) / 2.0)
+    idx = np.flatnonzero((t_sec >= start) & (t_sec <= start + dur_s))
+    if len(idx) < 3:
+        raise SystemExit(f'window {start:.2f}+{dur_s:.2f}s holds {len(idx)} samples; '
+                         f'the sequence is {total:.2f}s long')
+
+    out = {'original': dict(data['original']), 'optimized': dict(data['optimized'])}
+    out['original']['T'] = (t_sec[idx] - start) * 1e9
+    for key in ('w', 'x', 'y', 'z'):
+        out['original'][key] = data['original'][key][idx]
+    out['original']['frames'] = len(idx)
+    n_opt = data['optimized']['frames']
+    for key in ('w', 'x', 'y', 'z'):
+        out['optimized'][key] = data['optimized'][key][idx[idx < n_opt]]
+    out['optimized']['frames'] = int(min(len(idx), n_opt))
+    return out
+
+
+def plot_quaternion_comparison(data, save_path, png_name='quaternion_comparison.png'):
     """
     Plot a single comparison figure with four subplots for w, x, y, z components.
     Style inspired by plot_quat_compare.
@@ -89,57 +118,41 @@ def plot_quaternion_comparison(data, save_path, png_name='quaternion_comparison.
 
     # Figure width proportional to the time span (original style),
     # capped at ~20k px at save dpi=150 so long clips stay readable.
-    import matplotlib as mpl
-    dpi = mpl.rcParams['figure.dpi']
-    width = (T[-1] - T[0]) * 4000 / (dpi * (1600000000 if fps == 30 else 8000000000))
-    width = min(30000 / dpi, width)
-    width = min(width, 18000.0 / 150.0)
-    height = 6000 / dpi
+    SAVE_DPI = 150
+    target_px = (T[-1] - T[0]) / 8000000000 * 4000
+    target_px = min(18000.0, target_px)
+    width = target_px / SAVE_DPI
+    height = 3600.0 / SAVE_DPI
     
     sub_fig_num = 4
     fig, ax = plt.subplots(sub_fig_num, 1, sharex=True, figsize=(width, height))
-    for i in range(sub_fig_num):
-        ax[i].grid(which='both')
     plt.tight_layout()
     
     components = ['w', 'x', 'y', 'z']
     component_labels = ['W', 'X', 'Y', 'Z']
     
+    # X in seconds; nanoseconds would render as 0.0-1.0 with a 1e9 offset label
+    T_sec = (T - T[0]) * 1e-9
+    n_opt = optimized['frames']
+
     for i, comp in enumerate(components):
-        # Original data (all frames)
-        ax[i].plot(T - T[0], original[comp], '.-', alpha=0.5, label='Original')
-        # Product-filtered data (if provided; different coordinate frame!)
-        filtered = data.get('filtered')
-        if filtered is not None:
-            if filtered['frames'] <= len(T):
-                T_filtered = T[:filtered['frames']]
-            else:
-                T_filtered = np.arange(filtered['frames']) * (T[1] - T[0]) + T[0]
-            ax[i].plot(T_filtered - T[0], filtered[comp], '.-', alpha=0.5, label='Filtered(\u4ea7\u54c1)')
-        # Optimized data (may have fewer frames)
-        optimized_frames = np.arange(optimized['frames'])
-        # Align time: assume optimized corresponds to first N original timestamps
-        if optimized['frames'] <= len(T):
-            T_optimized = T[:optimized['frames']]
-        else:
-            T_optimized = np.arange(optimized['frames']) * (T[1] - T[0]) + T[0]
-        ax[i].plot(T_optimized - T[0], optimized[comp], '.-', alpha=0.5, label='Optimized')
-        ax[i].set_ylabel(f'{component_labels[i]}', fontsize=12)
+        # Optimized is frame-aligned with the original, so it shares the same time axis
+        ax[i].plot(T_sec, original[comp], '.-', alpha=0.5, label='Original')
+        ax[i].plot(T_sec[:n_opt], optimized[comp], '.-', alpha=0.5, label='Optimized')
+        ax[i].tick_params(axis='y', left=False, labelleft=False)
+        ax[i].text(0.006, 0.05, component_labels[i], transform=ax[i].transAxes,
+                   va='bottom', ha='left')
         ax[i].legend()
     
-    ax[-1].set_xlabel('Time (relative)', fontsize=12)
+    ax[-1].set_xlabel('Time (s)')
     
-    # Set x-axis major locator similar to reference
-    ax[0].xaxis.set_major_locator(ticker.MultipleLocator(1000000000))
+    ax[0].xaxis.set_major_locator(ticker.MultipleLocator(1.0))
     
-    title = ('Quaternion Components: Original vs Filtered vs Optimized'
-             if data.get('filtered') is not None else 'Quaternion Components: Original vs Optimized')
-    plt.suptitle(title, fontsize=14, y=0.98)
-    plt.tight_layout(rect=[0, 0, 1, 0.96])  # Adjust for suptitle
+    plt.tight_layout()
     
     # Save figure
     output_path = os.path.join(save_path, png_name)
-    plt.savefig(output_path, dpi=150)
+    plt.savefig(output_path, dpi=SAVE_DPI)
     plt.close()
     
     return output_path
@@ -148,28 +161,31 @@ def main():
     """Main function: load two quaternion CSVs and save a comparison plot."""
     ap = argparse.ArgumentParser(description='Plot original vs optimized quaternions.')
     base_dir = Path(__file__).parent.parent
-    ap.add_argument('--original', default=str(base_dir / 'data' / 'DbgFile_Frame_OriginalCamOrient.csv'))
-    ap.add_argument('--filtered', default=str(base_dir / 'data' / 'DbgFile_Frame_FilteredCamOrient.csv'))
-    ap.add_argument('--optimized', default=str(base_dir / 'data' / 'optimized_quaternions.csv'))
-    ap.add_argument('--out-dir', default=str(Path(__file__).parent / 'plots'))
-    ap.add_argument('--png-name', default='quaternion_comparison.png')
+    # Defaults point at the first rendered DVS clip so a bare run just works
+    dvs_clip = Path('/home/tangjian5/data/DeepFVS/dataset_release/output/pipeline/'
+                    's_114b_outdoor_running_trail_night')
+    ap.add_argument('--original', default=str(dvs_clip / 'quat.csv'))
+    ap.add_argument('--optimized', default=str(dvs_clip / 'opt.csv'))
+    ap.add_argument('--out-dir', default='/tmp/plotquat')
+    ap.add_argument('--png-name', default='dvs_trail_night.png')
+    ap.add_argument('--clip-sec', type=float, default=0.0,
+                    help='plotted window in seconds (0 = whole sequence)')
+    ap.add_argument('--start-sec', type=float, default=None,
+                    help='window start in seconds (default: centred)')
     args = ap.parse_args()
 
-    # Load data (filtered is optional: GoPro runs only have raw + optimized)
-    filtered_path = args.filtered if args.filtered and os.path.exists(args.filtered) else None
-    data = load_quaternion_data(args.original, args.optimized, filtered_path)
+    data = load_quaternion_data(args.original, args.optimized)
 
     print(f"\nData Summary:")
     print(f"  Original frames: {data['original']['frames']}")
-    if 'filtered' in data:
-        print(f"  Filtered frames: {data['filtered']['frames']}")
     print(f"  Optimized frames: {data['optimized']['frames']}")
 
     # Create output directory
     output_dir = Path(args.out_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Generate comparison plot
+    # Generate comparison plot, windowed to --clip-sec unless 0 was passed
+    data = clip_window(data, args.start_sec, args.clip_sec)
     saved_path = plot_quaternion_comparison(data, save_path=output_dir, png_name=args.png_name)
     print(f"\nSaved plot to: {saved_path}")
 
