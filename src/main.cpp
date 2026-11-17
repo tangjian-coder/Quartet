@@ -20,10 +20,10 @@ void printUsage(const char* exe_name) {
     std::cout << "Usage: " << exe_name
               << " [--anchor-frames N] [--output-frames N] [--future-frames N] [--verbose]"
               << std::endl;
-    std::cout << "  --quat <path>    raw quaternion csv (default ../data/DbgFile_Frame_OriginalCamOrient.csv)" << std::endl;
+    std::cout << "  --quat <path>    raw quaternion csv (default ../data/quat.csv)" << std::endl;
     std::cout << "  --yaml <path>    config yaml      (default ../data/conf.yaml)" << std::endl;
-    std::cout << "  --rcs <path>     RCS grid csv     (default ../data/DbgFile_WarpGrids_RSCFRMMid.csv)" << std::endl;
-    std::cout << "  --output <path>  optimized quat csv (default ../data/optimized_quaternions.csv)" << std::endl;
+    std::cout << "  --rcs <path>     RCS grid csv     (default ../data/rcs.csv)" << std::endl;
+    std::cout << "  --output <path>  optimized quat csv (default ../data/opt.csv)" << std::endl;
 }
 
 bool parseSizeT(const std::string& value, size_t& out) {
@@ -60,10 +60,10 @@ int main(int argc, char** argv) {
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
 
-    const std::string quat_path = "../data/DbgFile_Frame_OriginalCamOrient.csv";
+    const std::string quat_path = "../data/quat.csv";
     const std::string yaml_path = "../data/conf.yaml";
-    const std::string rcs_path = "../data/DbgFile_WarpGrids_RSCFRMMid.csv";
-    const std::string output_path = "../data/optimized_quaternions.csv";
+    const std::string rcs_path = "../data/rcs.csv";
+    const std::string output_path = "../data/opt.csv";
     std::string quat_path_opt = quat_path, yaml_path_opt = yaml_path;
     std::string rcs_path_opt = rcs_path, output_path_opt = output_path;
 
@@ -76,7 +76,7 @@ int main(int argc, char** argv) {
             printUsage(argv[0]);
             return 0;
         }
-        // Path overrides (defaults keep ../data/... for backward compat).
+        // Path overrides; defaults match the pipeline layout under ../data.
         if (arg == "--quat") {
             if (arg_idx + 1 >= argc) { std::cerr << "Missing value for --quat" << std::endl; return 1; }
             quat_path_opt = argv[++arg_idx];
