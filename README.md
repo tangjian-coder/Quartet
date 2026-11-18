@@ -8,6 +8,8 @@
 
 附 GoPro-IMU / ADVIO / DVS 三个数据集的输入生成与渲染适配器，以及对比图、并排 GIF 工具。
 
+[English](README_EN.md)
+
 ---
 
 ## 目录结构
@@ -136,25 +138,31 @@ python3 adapters/dvs/dvs_render.py --seq s_115c_outdoor_running_Upstairs_daytime
 
 ## 效果
 
-每个数据集一条代表序列：左侧原始，右侧稳定后；绿框是裁剪边界。
+每个数据集一条代表序列。左侧原始，右侧稳定后，绿框是裁剪边界；点图看原尺寸。
 
 **GoPro-IMU · playground1**
 
-![GoPro playground1](docs/media/gopro/playground1.gif)
-
-![GoPro playground1 quaternions](docs/media/gopro/playground1.png)
+<p align="center">
+  <a href="docs/media/gopro/playground1.gif"><img src="docs/media/gopro/playground1.gif" width="620"></a>
+  <br>
+  <a href="docs/media/gopro/playground1.png"><img src="docs/media/gopro/playground1.png" width="620"></a>
+</p>
 
 **ADVIO · advio-21**（竖屏，取第 30–40 秒）
 
-![ADVIO advio-21](docs/media/advio/advio-21.gif)
-
-![ADVIO advio-21 quaternions](docs/media/advio/advio-21.png)
+<p align="center">
+  <a href="docs/media/advio/advio-21.gif"><img src="docs/media/advio/advio-21.gif" width="620"></a>
+  <br>
+  <a href="docs/media/advio/advio-21.png"><img src="docs/media/advio/advio-21.png" width="620"></a>
+</p>
 
 **DVS · s_115c_Upstairs_daytime**
 
-![DVS Upstairs](docs/media/dvs/s_115c_Upstairs_daytime.gif)
-
-![DVS Upstairs quaternions](docs/media/dvs/s_115c_Upstairs_daytime.png)
+<p align="center">
+  <a href="docs/media/dvs/s_115c_Upstairs_daytime.gif"><img src="docs/media/dvs/s_115c_Upstairs_daytime.gif" width="620"></a>
+  <br>
+  <a href="docs/media/dvs/s_115c_Upstairs_daytime.png"><img src="docs/media/dvs/s_115c_Upstairs_daytime.png" width="620"></a>
+</p>
 
 `opt.log` 的 `[Verify]` 行记录 `max_sdf`（四个裁剪角到边界的最大有符号距离，正值即越界）。59 条序列、5806 个窗口，最坏 0.045 px，`violations=0`，容差 0.05 px。留边较紧的 DVS / ADVIO 序列会收敛到贴着容差，约束在起作用，不是靠余量。
 
@@ -173,6 +181,12 @@ python3 utils/make_compare_gif.py --ori <原始> --stab <稳定> --out out.gif \
 ```
 
 `--clip-sec 0` 表示全片；`--start-sec` 缺省为居中。
+
+---
+
+## 数据集下载
+
+14 条序列的原始数据、输入管线、优化输出与稳定后视频：[Google Drive](https://drive.google.com/drive/folders/1z-KH7VKPUNK6Lcg4NO7veKsK46Q-ur_A)
 
 ---
 
