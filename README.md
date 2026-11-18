@@ -2,7 +2,7 @@
 
 把 IMU 姿态优化成平滑序列，同时保证防抖后画面不越过裁剪边界。
 
-边界是优化问题的一部分，不是平滑之后再检查：姿态和安全边距一起收敛，解直接落在可行域里。59 条序列、5806 个窗口的实测，最坏越界 0.045 px。和「先平滑、再裁掉溢出部分」的做法相比，这一版的裁剪量是提前定好的，不依赖平滑结果。
+边界是优化问题的一部分，不是平滑之后再检查：姿态和安全边距一起收敛，裁剪量提前定好。59 条序列、5806 个窗口，最坏越界 0.045 px。
 
 求解器为 Gauss-Newton + 增广拉格朗日：内层最小化速度、加速度、加加速度、保真度四项损失，外层用 RCS 网格的 SDF 约束。推导见 `docs/`。
 
@@ -164,7 +164,7 @@ python3 adapters/dvs/dvs_render.py --seq s_115c_outdoor_running_Upstairs_daytime
   <a href="docs/media/dvs/s_115c_Upstairs_daytime.png"><img src="docs/media/dvs/s_115c_Upstairs_daytime.png" width="620"></a>
 </p>
 
-`opt.log` 的 `[Verify]` 行记录 `max_sdf`（四个裁剪角到边界的最大有符号距离，正值即越界）。59 条序列、5806 个窗口，最坏 0.045 px，`violations=0`，容差 0.05 px。留边较紧的 DVS / ADVIO 序列会收敛到贴着容差，约束在起作用，不是靠余量。
+`opt.log` 每行 `[Verify]` 里的 `max_sdf` 是四个裁剪角到边界的最大有符号距离。
 
 ---
 

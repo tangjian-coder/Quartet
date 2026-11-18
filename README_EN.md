@@ -2,7 +2,7 @@
 
 Turns IMU orientation into a smooth sequence that still keeps the stabilized frame inside its crop boundary.
 
-The boundary is part of the optimization, not a check afterwards: orientation and margin converge together, so the solution lands in the feasible set. Across 59 sequences and 5806 windows the worst violation is 0.045 px. Compared with "smooth first, then crop away the overflow", the crop here is fixed in advance and does not depend on how the smoothing turned out.
+The boundary is part of the optimization, not a check afterwards: orientation and margin converge together and the crop is fixed in advance. Across 59 sequences and 5806 windows the worst violation is 0.045 px.
 
 The solver is Gauss-Newton with an augmented Lagrangian: the inner loop minimizes velocity, acceleration, jerk and fidelity losses, the outer loop enforces SDF constraints from an RCS grid. The derivation is in `docs/`.
 
@@ -164,7 +164,7 @@ One representative sequence per dataset. Original on the left, stabilized on the
   <a href="docs/media/dvs/s_115c_Upstairs_daytime.png"><img src="docs/media/dvs/s_115c_Upstairs_daytime.png" width="620"></a>
 </p>
 
-The `[Verify]` line in `opt.log` records `max_sdf`, the largest signed distance from the four crop corners to the boundary, positive meaning outside. Over 59 sequences and 5806 windows the worst case is 0.045 px with `violations=0` against a 0.05 px tolerance. Sequences with tight margins, mostly DVS and ADVIO, converge right up to the tolerance — the constraint is doing work rather than coasting on slack.
+`max_sdf` on each `[Verify]` line of `opt.log` is the largest signed distance from the four crop corners to the boundary.
 
 ---
 
