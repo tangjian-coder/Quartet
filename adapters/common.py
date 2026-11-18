@@ -1,4 +1,4 @@
-"""Shared math for the dataset adapters -> quaternion_optimizer input.
+"""Shared math for the dataset adapters -> quartet input.
 
 Conventions (single convention end to end):
 - gyro raw measurement: body-frame angular velocity (rad/s)
@@ -515,7 +515,7 @@ def warp_pixels(calib, quat_at, t0, q_out, frame_w, frame_h, use_rs=True,
 
 
 def write_conf(out_path, fx, fy, cx, cy, width, height, crop_h, crop_v, grid_h, grid_v):
-    """Write conf.yaml (field names must match quaternion_optimizer DataLoader)
+    """Write conf.yaml (field names must match quartet DataLoader)
 
     Intrinsics are real K in top-left origin pixels. The RCS grid stores corrected
     real-K pixels normalized to center-origin [-1,1], so the loader must convert the

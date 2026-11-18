@@ -1,4 +1,4 @@
-"""GoPro-IMU dataset (LiU CVPR'18) -> quaternion_optimizer input adapter
+"""GoPro-IMU dataset (LiU CVPR'18) -> quartet input adapter
 
 Pipeline: imu.h5 --fix_timestamps(keep all samples)--> gyro --minus gbias-->
           camera-frame angular velocity (rot extrinsics) --left-multiply integration-->

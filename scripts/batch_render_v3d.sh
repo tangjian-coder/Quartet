@@ -4,7 +4,7 @@
 # Output: <case>/our_out_v3d/final_stabilized_render2.mp4
 set -u
 OPT_DIR=/mnt/c/A_TangJian/opt
-SCRIPT=/home/tangjian5/opt_quat/utils/render_videos.py
+SCRIPT=/home/tangjian5/quartet/utils/render_videos.py
 SUMMARY=/tmp/batch_render_v3d_summary.txt
 
 : > "$SUMMARY"

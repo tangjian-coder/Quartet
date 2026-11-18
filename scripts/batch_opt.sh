@@ -4,7 +4,7 @@
 # optimized_quaternions.csv. Rendering is a separate step (batch_render.sh).
 set -u
 OPT_DIR=/mnt/c/A_TangJian/opt
-BIN=/home/tangjian5/opt_quat/build/quaternion_optimizer
+BIN=/home/tangjian5/quartet/build/quartet
 SUMMARY=/tmp/batch_opt_summary.txt
 
 : > "$SUMMARY"

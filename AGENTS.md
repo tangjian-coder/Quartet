@@ -71,7 +71,7 @@ Per window:
 ## Build, Test, and Development Commands
 - Configure: `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release`
 - Build: `cmake --build build --config Release`
-- Run: `./build/quaternion_optimizer`
+- Run: `./build/quartet`
 - Clean rebuild: `cmake --build build --target clean && cmake --build build`
 - Plot: `python utils/plot_quaternions.py`
 
@@ -109,7 +109,7 @@ Solver knobs are split by role:
 
 ## Testing Guidelines
 - No dedicated automated test suite.
-- Validate by: `cmake --build build --config Release && ./build/quaternion_optimizer`.
+- Validate by: `cmake --build build --config Release && ./build/quartet`.
 - Verify output CSV and plot via `utils/plot_quaternions.py`.
 - If adding tests, prefer CTest-compatible targets under `tests/`.
 
