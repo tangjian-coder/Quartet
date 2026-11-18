@@ -1,12 +1,8 @@
 # Quartet
 
-把 IMU 姿态优化成平滑序列，同时保证防抖后画面不越过裁剪边界。
+把 IMU 姿态优化成平滑序列，同时保证防抖后画面不越过裁剪边界。边界不是平滑之后再检查的，而是优化问题的硬约束 —— 姿态和裁剪边距在同一个问题里收敛，一次求解。实测 59 条序列、5806 个窗口，最坏越界 **0.045 px**（容差 0.05 px，`violations=0`）。
 
-边界是优化问题的一部分，不是平滑之后再检查：姿态和安全边距一起收敛，裁剪量提前定好。59 条序列、5806 个窗口，最坏越界 0.045 px。
-
-求解器为 Gauss-Newton + 增广拉格朗日：内层最小化速度、加速度、加加速度、保真度四项损失，外层用 RCS 网格的 SDF 约束。推导见 `docs/`。
-
-附 GoPro-IMU / ADVIO / DVS 三个数据集的输入生成与渲染适配器，以及对比图、并排 GIF 工具。
+求解器为 Gauss-Newton + 增广拉格朗日：内层最小化速度、加速度、加加速度、保真度四项损失，外层用 RCS 网格的 SDF 约束，推导见 `docs/`。仓库附带 GoPro-IMU / ADVIO / DVS 输入生成与渲染适配器，以及对比图、并排 GIF 工具。
 
 [English](README_EN.md)
 
@@ -16,6 +12,8 @@
 
 ```
 quartet/
+├── CMakeLists.txt          构建脚本
+├── AGENTS.md               仓库约定与开发规范
 ├── src/                    C++ 实现（main / DataLoader / Optimizer / GeometryTools / FileUtils）
 ├── include/                对应头文件
 ├── data/                   默认输入输出
@@ -29,7 +27,9 @@ quartet/
 │   └── dvs/
 ├── utils/
 │   ├── plot_quaternions.py 四元数对比图
-│   └── make_compare_gif.py 左右并排 GIF
+│   ├── make_compare_gif.py 左右并排 GIF
+│   ├── make_compare_still.py 单帧对比图
+│   └── render_videos.py    批量渲染稳定后视频
 ├── scripts/                批量优化、渲染
 ├── tests/                  Jacobian、平滑度、SDF 尺度自检
 └── docs/
@@ -100,6 +100,21 @@ cropFactorV: 0.2
 
 ---
 
+## 目标函数
+
+四项损失加权求和，前三个为平滑项，第四个为保真项：
+
+| 项 | 权重 | 含义 |
+|---|---|---|
+| 速度 | `lambda1 = 1.0` | 相邻帧相对旋转 |
+| 加速度 | `lambda2 = 2.0` | 二阶差分 |
+| 加加速度 | `lambda3 = 8.0` | 三阶差分 |
+| 保真度 | `mu = 0.02` | 偏离原始姿态 |
+
+外层增广拉格朗日：惩罚系数 `rho` 初值 20，每次失败乘 `gamma = 2`，上限 500。
+
+---
+
 ## 约定
 
 四元数与旋转矩阵统一表示 `p_current = R(q) · p_world`（world → camera），全链路不做共轭。
@@ -138,33 +153,32 @@ python3 adapters/dvs/dvs_render.py --seq s_115c_outdoor_running_Upstairs_daytime
 
 ## 效果
 
-每个数据集一条代表序列。左侧原始，右侧稳定后，绿框是裁剪边界；点图看原尺寸。
+三个数据集各取一条代表序列。视频左原始、右稳定后，绿框是裁剪边界；曲线是四元数四个分量。点任意一张看原尺寸。
 
-**GoPro-IMU · playground1**
+视频按画面方向排：左边上下两条横屏（GoPro、DVS），右边一条竖屏（ADVIO），两者总高一致。
 
-<p align="center">
-  <a href="docs/media/gopro/playground1.gif"><img src="docs/media/gopro/playground1.gif" width="620"></a>
-  <br>
-  <a href="docs/media/gopro/playground1.png"><img src="docs/media/gopro/playground1.png" width="620"></a>
-</p>
+<table align="center">
+  <tr>
+    <td align="center">
+      <a href="docs/media/gopro/playground1.gif"><img src="docs/media/gopro/playground1.gif" width="420"></a><br>
+      <sub>GoPro-IMU · playground1</sub><br>
+      <a href="docs/media/dvs/s_115c_Upstairs_daytime.gif"><img src="docs/media/dvs/s_115c_Upstairs_daytime.gif" width="420"></a><br>
+      <sub>DVS · s_115c Upstairs</sub>
+    </td>
+    <td align="center" valign="middle">
+      <a href="docs/media/advio/advio-21.gif"><img src="docs/media/advio/advio-21.gif" height="242"></a><br>
+      <sub>ADVIO · advio-21（竖屏）</sub>
+    </td>
+  </tr>
+</table>
 
-**ADVIO · advio-21**（竖屏，取第 30–40 秒）
-
-<p align="center">
-  <a href="docs/media/advio/advio-21.gif"><img src="docs/media/advio/advio-21.gif" width="620"></a>
-  <br>
-  <a href="docs/media/advio/advio-21.png"><img src="docs/media/advio/advio-21.png" width="620"></a>
-</p>
-
-**DVS · s_115c_Upstairs_daytime**
-
-<p align="center">
-  <a href="docs/media/dvs/s_115c_Upstairs_daytime.gif"><img src="docs/media/dvs/s_115c_Upstairs_daytime.gif" width="620"></a>
-  <br>
-  <a href="docs/media/dvs/s_115c_Upstairs_daytime.png"><img src="docs/media/dvs/s_115c_Upstairs_daytime.png" width="620"></a>
-</p>
-
-`opt.log` 每行 `[Verify]` 里的 `max_sdf` 是四个裁剪角到边界的最大有符号距离。
+<table align="center">
+  <tr>
+    <td align="center"><a href="docs/media/gopro/playground1.png"><img src="docs/media/gopro/playground1.png" width="272"></a><br><sub>GoPro-IMU · playground1</sub></td>
+    <td align="center"><a href="docs/media/advio/advio-21.png"><img src="docs/media/advio/advio-21.png" width="272"></a><br><sub>ADVIO · advio-21（30–40 s）</sub></td>
+    <td align="center"><a href="docs/media/dvs/s_115c_Upstairs_daytime.png"><img src="docs/media/dvs/s_115c_Upstairs_daytime.png" width="272"></a><br><sub>DVS · s_115c Upstairs</sub></td>
+  </tr>
+</table>
 
 ---
 

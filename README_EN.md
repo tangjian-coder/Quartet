@@ -1,12 +1,8 @@
 # Quartet
 
-Turns IMU orientation into a smooth sequence that still keeps the stabilized frame inside its crop boundary.
+Turns IMU orientation into a smooth sequence that still keeps the stabilized frame inside its crop boundary. The boundary is not checked after smoothing; it is a hard constraint in the optimization itself, so orientation and crop margin converge in one pass. Across 59 sequences and 5806 windows the worst violation is **0.045 px** against a 0.05 px tolerance, `violations=0` throughout.
 
-The boundary is part of the optimization, not a check afterwards: orientation and margin converge together and the crop is fixed in advance. Across 59 sequences and 5806 windows the worst violation is 0.045 px.
-
-The solver is Gauss-Newton with an augmented Lagrangian: the inner loop minimizes velocity, acceleration, jerk and fidelity losses, the outer loop enforces SDF constraints from an RCS grid. The derivation is in `docs/`.
-
-Includes input and render adapters for GoPro-IMU, ADVIO and DVS, plus tools for comparison plots and side-by-side GIFs.
+The solver is Gauss-Newton with an augmented Lagrangian: velocity, acceleration, jerk and fidelity losses inside, SDF constraints from an RCS grid outside; the derivation is in `docs/`. The repository includes input and render adapters for GoPro-IMU, ADVIO and DVS, plus tools for comparison plots and side-by-side GIFs.
 
 [中文](README.md)
 
@@ -16,6 +12,8 @@ Includes input and render adapters for GoPro-IMU, ADVIO and DVS, plus tools for 
 
 ```
 quartet/
+├── CMakeLists.txt          build script
+├── AGENTS.md               repository conventions
 ├── src/                    C++ (main / DataLoader / Optimizer / GeometryTools / FileUtils)
 ├── include/                headers
 ├── data/                   default input and output
@@ -29,7 +27,9 @@ quartet/
 │   └── dvs/
 ├── utils/
 │   ├── plot_quaternions.py quaternion comparison plot
-│   └── make_compare_gif.py side-by-side GIF
+│   ├── make_compare_gif.py side-by-side GIF
+│   ├── make_compare_still.py single-frame comparison
+│   └── render_videos.py    batch render stabilized video
 ├── scripts/                batch optimize and render
 ├── tests/                  Jacobian, smoothness, SDF scale checks
 └── docs/
@@ -100,6 +100,21 @@ cropFactorV: 0.2
 
 ---
 
+## Objective
+
+Four weighted losses: three smoothness terms and one fidelity term:
+
+| Term | Weight | Meaning |
+|---|---|---|
+| velocity | `lambda1 = 1.0` | relative rotation between adjacent frames |
+| acceleration | `lambda2 = 2.0` | second-order difference |
+| jerk | `lambda3 = 8.0` | third-order difference |
+| fidelity | `mu = 0.02` | deviation from the input |
+
+Outer augmented Lagrangian: penalty `rho` starts at 20, multiplies by `gamma = 2` on failure, capped at 500.
+
+---
+
 ## Convention
 
 Quaternions and rotation matrices use `p_current = R(q) · p_world` (world → camera) throughout; nothing in the chain conjugates.
@@ -138,33 +153,32 @@ The render mode has no default: pass `--fix0` (anchor the first frame, to check 
 
 ## Results
 
-One representative sequence per dataset. Original on the left, stabilized on the right; the green box is the crop boundary. Click a figure for full size.
+One representative sequence per dataset. In each clip the original is on the left and the stabilized result on the right; the green box is the crop boundary. Plots show the four quaternion components. Click any figure for full size.
 
-**GoPro-IMU · playground1**
+Clips are grouped by orientation: two landscape ones stacked on the left (GoPro, DVS), one portrait on the right (ADVIO), with matching total height.
 
-<p align="center">
-  <a href="docs/media/gopro/playground1.gif"><img src="docs/media/gopro/playground1.gif" width="620"></a>
-  <br>
-  <a href="docs/media/gopro/playground1.png"><img src="docs/media/gopro/playground1.png" width="620"></a>
-</p>
+<table align="center">
+  <tr>
+    <td align="center">
+      <a href="docs/media/gopro/playground1.gif"><img src="docs/media/gopro/playground1.gif" width="420"></a><br>
+      <sub>GoPro-IMU · playground1</sub><br>
+      <a href="docs/media/dvs/s_115c_Upstairs_daytime.gif"><img src="docs/media/dvs/s_115c_Upstairs_daytime.gif" width="420"></a><br>
+      <sub>DVS · s_115c Upstairs</sub>
+    </td>
+    <td align="center" valign="middle">
+      <a href="docs/media/advio/advio-21.gif"><img src="docs/media/advio/advio-21.gif" height="242"></a><br>
+      <sub>ADVIO · advio-21 (portrait)</sub>
+    </td>
+  </tr>
+</table>
 
-**ADVIO · advio-21** (portrait, seconds 30–40)
-
-<p align="center">
-  <a href="docs/media/advio/advio-21.gif"><img src="docs/media/advio/advio-21.gif" width="620"></a>
-  <br>
-  <a href="docs/media/advio/advio-21.png"><img src="docs/media/advio/advio-21.png" width="620"></a>
-</p>
-
-**DVS · s_115c_Upstairs_daytime**
-
-<p align="center">
-  <a href="docs/media/dvs/s_115c_Upstairs_daytime.gif"><img src="docs/media/dvs/s_115c_Upstairs_daytime.gif" width="620"></a>
-  <br>
-  <a href="docs/media/dvs/s_115c_Upstairs_daytime.png"><img src="docs/media/dvs/s_115c_Upstairs_daytime.png" width="620"></a>
-</p>
-
-`max_sdf` on each `[Verify]` line of `opt.log` is the largest signed distance from the four crop corners to the boundary.
+<table align="center">
+  <tr>
+    <td align="center"><a href="docs/media/gopro/playground1.png"><img src="docs/media/gopro/playground1.png" width="272"></a><br><sub>GoPro-IMU · playground1</sub></td>
+    <td align="center"><a href="docs/media/advio/advio-21.png"><img src="docs/media/advio/advio-21.png" width="272"></a><br><sub>ADVIO · advio-21 (30–40 s)</sub></td>
+    <td align="center"><a href="docs/media/dvs/s_115c_Upstairs_daytime.png"><img src="docs/media/dvs/s_115c_Upstairs_daytime.png" width="272"></a><br><sub>DVS · s_115c Upstairs</sub></td>
+  </tr>
+</table>
 
 ---
 
