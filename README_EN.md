@@ -204,6 +204,18 @@ Original data, pipeline input, optimizer output and stabilized video for 14 sequ
 
 ---
 
+## Sources and licenses
+
+| Dataset | Download | Source | License |
+|---|---|---|---|
+| GoPro-IMU | [LiU CVL](https://www.cvl.isy.liu.se/research/datasets/gopro-imu-dataset/) (`gopro-imu-dataset.zip`) | Ovrén, Forssén, *Spline Error Weighting for Robust Visual-Inertial Fusion*, CVPR 2018 | CC BY-SA 4.0 |
+| ADVIO | [AaltoVision/ADVIO](https://github.com/AaltoVision/ADVIO) | Cortés, Solin, Rahtu, Kannala, *ADVIO: An Authentic Dataset for Visual-Inertial Odometry*, ECCV 2018 | see the repository license |
+| DeepFVS | [zhmeishi.github.io/dvs](https://zhmeishi.github.io/dvs/) | Shi et al., *Deep Online Fused Video Stabilization*, WACV 2022 | CC BY-NC 4.0, non-commercial |
+
+This repository uses the data for stabilization evaluation only and does not modify the original content. The GIFs and plots under `docs/media/` are rendered from these sequences.
+
+---
+
 ## Docs
 
 | Document | Contents |

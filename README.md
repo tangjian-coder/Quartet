@@ -204,6 +204,18 @@ python3 utils/make_compare_gif.py --ori <原始> --stab <稳定> --out out.gif \
 
 ---
 
+## 数据来源与许可
+
+| 数据集 | 下载 | 出处 | 许可 |
+|---|---|---|---|
+| GoPro-IMU | [LiU CVL](https://www.cvl.isy.liu.se/research/datasets/gopro-imu-dataset/)（`gopro-imu-dataset.zip`）| Ovrén, Forssén, *Spline Error Weighting for Robust Visual-Inertial Fusion*, CVPR 2018 | CC BY-SA 4.0 |
+| ADVIO | [AaltoVision/ADVIO](https://github.com/AaltoVision/ADVIO) | Cortés, Solin, Rahtu, Kannala, *ADVIO: An Authentic Dataset for Visual-Inertial Odometry*, ECCV 2018 | 见仓库 license |
+| DeepFVS | [zhmeishi.github.io/dvs](https://zhmeishi.github.io/dvs/) | Shi et al., *Deep Online Fused Video Stabilization*, WACV 2022 | CC BY-NC 4.0，禁止商用 |
+
+本仓库仅用上述数据做防抖评测，未修改原始内容。`docs/media/` 中的 GIF 与曲线图由这些序列渲染得到。
+
+---
+
 ## 文档
 
 | 文档 | 内容 |
